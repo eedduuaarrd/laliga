@@ -1,0 +1,54 @@
+Aquí tens el prompt definitiu i complet. Està estructurat de manera que Replit entengui tant la jerarquia visual com la complexitat lògica que necessites per a una eina de nivell professional.
+
+Pots copiar i enganxar exactament això a l'interfície del Replit Agent:
+
+🖥️ Prompt per a Replit: Football Analytics & Prediction Pro-Engine
+"Build a comprehensive, real-time football analytics and prediction platform specifically optimized for the Spanish La Liga. The goal is to create a data-driven ecosystem for professional match analysis.
+
+1. Data Architecture & Integration:
+
+Connect to a football API (such as API-Football or Sportmonks) to ingest live and historical data.
+
+Real-time Match Stats: Track live scores, ball possession, shots (on/off target/blocked), corners, offsides, fouls, and goalkeeper saves.
+
+Detailed Lineups: Fetch confirmed starting XI, bench players, and tactical formations (e.g., 4-3-3, 4-2-3-1).
+
+Medical & Discipline Room: Monitor live injury reports (type of injury and recovery time), suspensions, and referee statistics (card averages).
+
+Player Performance: Track individual assists, key passes, big chances created, and expected goals (xG).
+
+2. Advanced Prediction Engine:
+
+Develop a 'Predictor Module' that calculates win/draw/loss probabilities using:
+
+Poisson Distribution for expected goals.
+
+Form Factor: Weighted average of the last 5 matches.
+
+H2H Analysis: Historical performance between the two teams.
+
+Absence Impact: Adjust team strength based on missing key players (injuries/suspensions).
+
+Market Insights: Compare AI predictions with live betting odds to find 'value' opportunities.
+
+3. Frontend & Visualization (UX/UI):
+
+Dashboard: Modern dark-mode interface using React and Tailwind CSS.
+
+Match Momentum: A live-updating area chart showing which team is dominating based on attacks, corners, and shots in the last 15 minutes.
+
+Stats Comparison: Side-by-side radar charts for comparing two teams or two players.
+
+Tables: Sortable standings including advanced metrics like Home/Away goal differential and 'Clean Sheets'.
+
+4. Backend & Storage:
+
+Database: Use PostgreSQL to store historical match data, player profiles, and previous prediction accuracy.
+
+Caching: Implement a caching layer (Redis or simple local cache) to reduce API costs and improve loading speed.
+
+Language: Python (FastAPI/Flask) or Node.js for the core logic.
+
+5. Specific Automation:
+
+Set up an automated 'Morning Briefing' section that summarizes today's La Liga matches, highlighting the most 'predictable' games based on the algorithm's confidence level.

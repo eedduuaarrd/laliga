@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "La Liga Pro Analytics"
+version = "1.0.0"
+id = "artifacts/laliga-pro"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22546
+
+[services.development]
+run = "pnpm --filter @workspace/laliga-pro run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/laliga-pro", "run", "build" ]
+publicDir = "artifacts/laliga-pro/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22546"
+BASE_PATH = "/"
