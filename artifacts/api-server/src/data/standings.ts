@@ -1,8 +1,22 @@
-import { TEAMS, type SeedTeam, buildCrestUrl } from "./teams.js";
+import { getStandings, type RawStandingsEntry, type RawStandingsGroup } from "../lib/espn.js";
+import { teamFromRaw, type LiveTeam } from "./teams.js";
+import { currentSeasonStartYear } from "../lib/season.js";
 
-export interface StandingSeed {
+export interface LiveStandingRow {
+  position: number;
   teamId: number;
+  teamName: string;
+  teamShortName: string;
+  crestUrl: string;
   played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+  points: number;
+  // Home/away splits (from ESPN home/away records when available)
   homeWins: number;
   homeDraws: number;
   homeLosses: number;
@@ -19,95 +33,158 @@ export interface StandingSeed {
   form: ("W" | "D" | "L")[];
 }
 
-// Hand-crafted realistic 2025-26 La Liga standings (12 matchdays played)
-const RAW: StandingSeed[] = [
-  { teamId: 2, played: 12, homeWins: 5, homeDraws: 1, homeLosses: 0, homeGoalsFor: 19, homeGoalsAgainst: 6, awayWins: 4, awayDraws: 1, awayLosses: 1, awayGoalsFor: 14, awayGoalsAgainst: 7, cleanSheets: 4, xG: 28.4, xGA: 11.2, form: ["W","W","D","W","W"] },
-  { teamId: 1, played: 12, homeWins: 5, homeDraws: 0, homeLosses: 1, homeGoalsFor: 17, homeGoalsAgainst: 6, awayWins: 4, awayDraws: 1, awayLosses: 1, awayGoalsFor: 13, awayGoalsAgainst: 8, cleanSheets: 5, xG: 26.1, xGA: 12.4, form: ["W","W","W","L","W"] },
-  { teamId: 3, played: 12, homeWins: 4, homeDraws: 2, homeLosses: 0, homeGoalsFor: 14, homeGoalsAgainst: 5, awayWins: 3, awayDraws: 2, awayLosses: 1, awayGoalsFor: 10, awayGoalsAgainst: 7, cleanSheets: 6, xG: 21.6, xGA: 10.1, form: ["W","D","W","W","D"] },
-  { teamId: 6, played: 12, homeWins: 4, homeDraws: 1, homeLosses: 1, homeGoalsFor: 13, homeGoalsAgainst: 7, awayWins: 3, awayDraws: 1, awayLosses: 2, awayGoalsFor: 9, awayGoalsAgainst: 8, cleanSheets: 4, xG: 19.2, xGA: 13.0, form: ["W","W","L","W","D"] },
-  { teamId: 4, played: 12, homeWins: 4, homeDraws: 2, homeLosses: 0, homeGoalsFor: 12, homeGoalsAgainst: 5, awayWins: 2, awayDraws: 2, awayLosses: 2, awayGoalsFor: 7, awayGoalsAgainst: 7, cleanSheets: 5, xG: 17.5, xGA: 11.4, form: ["D","W","W","D","W"] },
-  { teamId: 5, played: 12, homeWins: 3, homeDraws: 2, homeLosses: 1, homeGoalsFor: 11, homeGoalsAgainst: 7, awayWins: 3, awayDraws: 1, awayLosses: 2, awayGoalsFor: 9, awayGoalsAgainst: 9, cleanSheets: 3, xG: 17.1, xGA: 14.6, form: ["W","D","W","L","W"] },
-  { teamId: 10, played: 12, homeWins: 3, homeDraws: 1, homeLosses: 2, homeGoalsFor: 12, homeGoalsAgainst: 9, awayWins: 3, awayDraws: 1, awayLosses: 2, awayGoalsFor: 10, awayGoalsAgainst: 9, cleanSheets: 2, xG: 18.0, xGA: 15.4, form: ["W","L","W","W","D"] },
-  { teamId: 7, played: 12, homeWins: 3, homeDraws: 2, homeLosses: 1, homeGoalsFor: 10, homeGoalsAgainst: 6, awayWins: 2, awayDraws: 3, awayLosses: 1, awayGoalsFor: 8, awayGoalsAgainst: 8, cleanSheets: 4, xG: 15.8, xGA: 13.1, form: ["D","W","W","D","D"] },
-  { teamId: 12, played: 12, homeWins: 3, homeDraws: 2, homeLosses: 1, homeGoalsFor: 10, homeGoalsAgainst: 7, awayWins: 2, awayDraws: 2, awayLosses: 2, awayGoalsFor: 7, awayGoalsAgainst: 9, cleanSheets: 3, xG: 14.6, xGA: 14.8, form: ["W","D","L","W","W"] },
-  { teamId: 13, played: 12, homeWins: 3, homeDraws: 2, homeLosses: 1, homeGoalsFor: 8, homeGoalsAgainst: 5, awayWins: 1, awayDraws: 4, awayLosses: 1, awayGoalsFor: 6, awayGoalsAgainst: 7, cleanSheets: 4, xG: 12.6, xGA: 13.2, form: ["D","W","D","D","W"] },
-  { teamId: 11, played: 12, homeWins: 3, homeDraws: 1, homeLosses: 2, homeGoalsFor: 7, homeGoalsAgainst: 6, awayWins: 1, awayDraws: 4, awayLosses: 1, awayGoalsFor: 5, awayGoalsAgainst: 6, cleanSheets: 5, xG: 10.8, xGA: 12.0, form: ["L","D","W","D","D"] },
-  { teamId: 8, played: 12, homeWins: 2, homeDraws: 3, homeLosses: 1, homeGoalsFor: 8, homeGoalsAgainst: 7, awayWins: 2, awayDraws: 1, awayLosses: 3, awayGoalsFor: 7, awayGoalsAgainst: 11, cleanSheets: 3, xG: 14.2, xGA: 17.0, form: ["L","D","W","D","L"] },
-  { teamId: 17, played: 12, homeWins: 2, homeDraws: 2, homeLosses: 2, homeGoalsFor: 8, homeGoalsAgainst: 8, awayWins: 2, awayDraws: 2, awayLosses: 2, awayGoalsFor: 7, awayGoalsAgainst: 10, cleanSheets: 3, xG: 13.6, xGA: 17.1, form: ["W","L","D","W","L"] },
-  { teamId: 9, played: 12, homeWins: 2, homeDraws: 2, homeLosses: 2, homeGoalsFor: 7, homeGoalsAgainst: 8, awayWins: 1, awayDraws: 3, awayLosses: 2, awayGoalsFor: 6, awayGoalsAgainst: 9, cleanSheets: 2, xG: 11.6, xGA: 16.0, form: ["D","D","L","W","L"] },
-  { teamId: 15, played: 12, homeWins: 2, homeDraws: 2, homeLosses: 2, homeGoalsFor: 7, homeGoalsAgainst: 8, awayWins: 1, awayDraws: 3, awayLosses: 2, awayGoalsFor: 6, awayGoalsAgainst: 10, cleanSheets: 2, xG: 12.6, xGA: 16.5, form: ["L","W","D","L","D"] },
-  { teamId: 16, played: 12, homeWins: 2, homeDraws: 2, homeLosses: 2, homeGoalsFor: 6, homeGoalsAgainst: 7, awayWins: 1, awayDraws: 2, awayLosses: 3, awayGoalsFor: 5, awayGoalsAgainst: 10, cleanSheets: 4, xG: 11.2, xGA: 16.4, form: ["D","L","W","L","D"] },
-  { teamId: 14, played: 12, homeWins: 1, homeDraws: 3, homeLosses: 2, homeGoalsFor: 6, homeGoalsAgainst: 8, awayWins: 1, awayDraws: 2, awayLosses: 3, awayGoalsFor: 5, awayGoalsAgainst: 11, cleanSheets: 2, xG: 10.4, xGA: 17.8, form: ["L","D","L","D","W"] },
-  { teamId: 18, played: 12, homeWins: 2, homeDraws: 1, homeLosses: 3, homeGoalsFor: 6, homeGoalsAgainst: 9, awayWins: 1, awayDraws: 2, awayLosses: 3, awayGoalsFor: 5, awayGoalsAgainst: 12, cleanSheets: 2, xG: 11.0, xGA: 19.2, form: ["L","L","D","W","L"] },
-  { teamId: 19, played: 12, homeWins: 1, homeDraws: 3, homeLosses: 2, homeGoalsFor: 5, homeGoalsAgainst: 8, awayWins: 1, awayDraws: 2, awayLosses: 3, awayGoalsFor: 4, awayGoalsAgainst: 11, cleanSheets: 1, xG: 9.2, xGA: 18.6, form: ["D","L","D","L","D"] },
-  { teamId: 20, played: 12, homeWins: 1, homeDraws: 2, homeLosses: 3, homeGoalsFor: 5, homeGoalsAgainst: 10, awayWins: 0, awayDraws: 2, awayLosses: 4, awayGoalsFor: 3, awayGoalsAgainst: 13, cleanSheets: 1, xG: 8.4, xGA: 21.5, form: ["L","L","D","L","L"] },
-];
+function statValue(entry: RawStandingsEntry, names: string[]): number {
+  for (const n of names) {
+    const s = entry.stats.find(
+      (st) => st.name === n || st.abbreviation === n || st.type === n,
+    );
+    if (s && typeof s.value === "number") return s.value;
+  }
+  return 0;
+}
+function statString(entry: RawStandingsEntry, names: string[]): string | undefined {
+  for (const n of names) {
+    const s = entry.stats.find(
+      (st) => st.name === n || st.abbreviation === n || st.type === n,
+    );
+    if (s?.displayValue) return s.displayValue;
+  }
+  return undefined;
+}
 
-export function getStandingsRows() {
-  const enriched = RAW.map((s) => {
-    const team = TEAMS.find((t) => t.id === s.teamId)!;
-    const wins = s.homeWins + s.awayWins;
-    const draws = s.homeDraws + s.awayDraws;
-    const losses = s.homeLosses + s.awayLosses;
-    const goalsFor = s.homeGoalsFor + s.awayGoalsFor;
-    const goalsAgainst = s.homeGoalsAgainst + s.awayGoalsAgainst;
-    const points = wins * 3 + draws;
-    return {
-      teamId: s.teamId,
-      teamName: team.name,
-      teamShortName: team.shortName,
-      crestUrl: buildCrestUrl(team),
-      played: s.played,
-      wins,
-      draws,
-      losses,
-      goalsFor,
-      goalsAgainst,
-      goalDifference: goalsFor - goalsAgainst,
-      points,
-      homeWins: s.homeWins,
-      homeDraws: s.homeDraws,
-      homeLosses: s.homeLosses,
-      homeGoalsFor: s.homeGoalsFor,
-      homeGoalsAgainst: s.homeGoalsAgainst,
-      awayWins: s.awayWins,
-      awayDraws: s.awayDraws,
-      awayLosses: s.awayLosses,
-      awayGoalsFor: s.awayGoalsFor,
-      awayGoalsAgainst: s.awayGoalsAgainst,
-      cleanSheets: s.cleanSheets,
-      xG: s.xG,
-      xGA: s.xGA,
-      form: s.form,
-    };
-  });
-  enriched.sort((a, b) => {
+function flattenEntries(g: RawStandingsGroup): RawStandingsEntry[] {
+  if (g.standings?.entries?.length) return g.standings.entries;
+  if (g.children) {
+    for (const c of g.children) {
+      const e = flattenEntries(c);
+      if (e.length) return e;
+    }
+  }
+  return [];
+}
+
+function parseRecord(rec: string | undefined): { w: number; d: number; l: number } {
+  // ESPN sometimes encodes home/away as "5-1-0" (W-L-D in some sports). For soccer
+  // ESPN's stat names "homeWins" etc. are reliable, so we use stat values; this is fallback only.
+  if (!rec) return { w: 0, d: 0, l: 0 };
+  const m = rec.match(/^(\d+)-(\d+)-(\d+)$/);
+  if (!m) return { w: 0, d: 0, l: 0 };
+  return { w: Number(m[1]), d: Number(m[2]), l: Number(m[3]) };
+}
+
+function parseForm(form: string | undefined): ("W" | "D" | "L")[] {
+  if (!form) return [];
+  return form.split("").filter((c) => c === "W" || c === "D" || c === "L") as ("W" | "D" | "L")[];
+}
+
+function rowFromEntry(entry: RawStandingsEntry): LiveStandingRow {
+  const team: LiveTeam = teamFromRaw(entry.team);
+  const wins = statValue(entry, ["wins", "W"]);
+  const draws = statValue(entry, ["ties", "draws", "D", "T"]);
+  const losses = statValue(entry, ["losses", "L"]);
+  const played = statValue(entry, ["gamesPlayed", "GP"]);
+  const goalsFor = statValue(entry, ["pointsFor", "goalsFor", "GF"]);
+  const goalsAgainst = statValue(entry, ["pointsAgainst", "goalsAgainst", "GA"]);
+  const points = statValue(entry, ["points", "PTS"]);
+
+  const homeWins = statValue(entry, ["homeWins"]);
+  const homeDraws = statValue(entry, ["homeTies"]);
+  const homeLosses = statValue(entry, ["homeLosses"]);
+  const awayWins = statValue(entry, ["awayWins"]);
+  const awayDraws = statValue(entry, ["awayTies"]);
+  const awayLosses = statValue(entry, ["awayLosses"]);
+
+  // Some splits aren't returned as stat values; derive partially.
+  const homeGoalsFor = statValue(entry, ["homeGoalsFor"]);
+  const homeGoalsAgainst = statValue(entry, ["homeGoalsAgainst"]);
+  const awayGoalsFor = statValue(entry, ["awayGoalsFor"]);
+  const awayGoalsAgainst = statValue(entry, ["awayGoalsAgainst"]);
+
+  const splitsMissing = homeWins + homeDraws + homeLosses + awayWins + awayDraws + awayLosses === 0;
+  let hw = homeWins, hd = homeDraws, hl = homeLosses, aw = awayWins, ad = awayDraws, al = awayLosses;
+  if (splitsMissing) {
+    const home = parseRecord(statString(entry, ["Home", "home"]));
+    const away = parseRecord(statString(entry, ["Away", "away"]));
+    hw = home.w; hd = home.d; hl = home.l;
+    aw = away.w; ad = away.d; al = away.l;
+  }
+
+  return {
+    position: 0, // filled in after sort
+    teamId: team.id,
+    teamName: team.name,
+    teamShortName: team.shortName,
+    crestUrl: team.crestUrl,
+    played,
+    wins,
+    draws,
+    losses,
+    goalsFor,
+    goalsAgainst,
+    goalDifference: goalsFor - goalsAgainst,
+    points,
+    homeWins: hw,
+    homeDraws: hd,
+    homeLosses: hl,
+    homeGoalsFor,
+    homeGoalsAgainst,
+    awayWins: aw,
+    awayDraws: ad,
+    awayLosses: al,
+    awayGoalsFor,
+    awayGoalsAgainst,
+    cleanSheets: 0, // ESPN public standings doesn't expose this; left as 0
+    xG: 0,
+    xGA: 0,
+    form: parseForm(statString(entry, ["recentResults", "form", "Streak"])),
+  };
+}
+
+export async function getStandingsRows(): Promise<LiveStandingRow[]> {
+  const data = await getStandings(currentSeasonStartYear());
+  const entries = flattenEntries(data);
+  const rows = entries.map(rowFromEntry);
+  rows.sort((a, b) => {
     if (b.points !== a.points) return b.points - a.points;
     if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
     return b.goalsFor - a.goalsFor;
   });
-  return enriched.map((row, i) => ({ position: i + 1, ...row }));
+  return rows.map((r, i) => ({ ...r, position: i + 1 }));
 }
 
-export function getTeamStanding(teamId: number) {
-  const all = getStandingsRows();
+export async function getTeamStanding(teamId: number): Promise<LiveStandingRow | undefined> {
+  const all = await getStandingsRows();
   return all.find((r) => r.teamId === teamId);
 }
 
-export function getTeamFormScore(teamId: number): number {
-  const seed = RAW.find((s) => s.teamId === teamId);
-  if (!seed) return 1.0;
+export async function getTeamFormScore(teamId: number): Promise<number> {
+  const row = await getTeamStanding(teamId);
+  if (!row || row.form.length === 0) return 1.0;
   const map: Record<string, number> = { W: 3, D: 1, L: 0 };
-  const sum = seed.form.reduce((acc, r) => acc + map[r], 0);
-  // Normalize 0..15 -> 0.6..1.4
-  return +(0.6 + (sum / 15) * 0.8).toFixed(3);
+  const sum = row.form.reduce((a, r) => a + (map[r] ?? 0), 0);
+  const max = row.form.length * 3;
+  return +(0.6 + (sum / Math.max(1, max)) * 0.8).toFixed(3);
 }
 
-export function getTeamForm(teamId: number): ("W"|"D"|"L")[] {
-  const seed = RAW.find((s) => s.teamId === teamId);
-  return seed?.form ?? ["D","D","D","D","D"];
+export async function getTeamForm(teamId: number): Promise<("W" | "D" | "L")[]> {
+  const row = await getTeamStanding(teamId);
+  return row?.form ?? [];
 }
 
-export function getTeamSeed(teamId: number): SeedTeam {
-  return TEAMS.find((t) => t.id === teamId)!;
+// Per-game offensive/defensive rate, used by the Poisson model.
+export async function getTeamRates(teamId: number): Promise<{
+  attackRate: number;
+  defenseRate: number;
+  homeAdvantage: number;
+}> {
+  const row = await getTeamStanding(teamId);
+  if (!row || row.played === 0) {
+    return { attackRate: 1.3, defenseRate: 1.3, homeAdvantage: 1.15 };
+  }
+  const gp = Math.max(1, row.played);
+  return {
+    attackRate: +(row.goalsFor / gp).toFixed(3),
+    defenseRate: +(row.goalsAgainst / gp).toFixed(3),
+    homeAdvantage: 1.15, // standard La Liga home factor (data source doesn't expose this)
+  };
 }

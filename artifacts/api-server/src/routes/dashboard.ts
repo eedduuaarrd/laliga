@@ -1,64 +1,54 @@
-import { Router, type IRouter } from "express";
-import { MATCHES } from "../data/matches.js";
-import { TEAMS } from "../data/teams.js";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { getAllMatches, getCurrentGameweek } from "../data/matches.js";
 import { getStandingsRows } from "../data/standings.js";
-import { PLAYERS } from "../data/players.js";
 import { GetDashboardSummaryResponse } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
 
-router.get("/dashboard/summary", (_req, res) => {
-  const standings = getStandingsRows();
-  const leader = standings[0]!;
-  const liveCount = MATCHES.filter((m) => m.status === "live").length;
+router.get("/dashboard/summary", wrap(async (_req, res) => {
+  const [standings, matches, gw] = await Promise.all([
+    getStandingsRows(),
+    getAllMatches(),
+    getCurrentGameweek(),
+  ]);
+  const leader = standings[0];
+  const liveCount = matches.filter((m) => m.status === "live").length;
   const todayStr = new Date().toISOString().split("T")[0]!;
-  const todaysCount = MATCHES.filter((m) => m.kickoff.startsWith(todayStr)).length;
+  const todaysCount = matches.filter((m) => m.kickoff.startsWith(todayStr)).length;
 
-  const topScorerP = [...PLAYERS].sort((a, b) => b.goals - a.goals)[0]!;
-  const topScorerTeam = TEAMS.find((t) => t.id === topScorerP.teamId)!;
-  const topAssisterP = [...PLAYERS].sort((a, b) => b.assists - a.assists)[0]!;
-  const topAssisterTeam = TEAMS.find((t) => t.id === topAssisterP.teamId)!;
+  // Top scorer / assister: ESPN public scoreboard exposes goal-event scorers per
+  // game in `summary.leaders` (per match), not a season-wide top scorer feed in
+  // a single call. We surface the best leader from the most recent finished
+  // match as a representative sample; in absence we degrade gracefully.
+  let topScorer = { playerName: "—", teamShortName: "—", goals: 0 };
+  let topAssister = { playerName: "—", teamShortName: "—", assists: 0 };
 
-  // Simulated model accuracy
-  const totalPredictions = 120;
-  const correctPredictions = 67;
-  const accuracyPct = +((correctPredictions / totalPredictions) * 100).toFixed(1);
-  const roi = 12.4;
+  // Model accuracy / ROI: we don't have a backtest pipeline yet — surface zeros
+  // with honest labels rather than fabricated numbers.
+  const totalPredictions = 0;
+  const correctPredictions = 0;
+  const accuracyPct = 0;
+  const roi = 0;
 
-  const weeklyAccuracy = Array.from({ length: 12 }, (_, i) => {
-    const gw = i + 1;
-    const seed = (gw * 17 + 11) % 25;
-    const acc = 48 + seed; // 48..72%
-    return { gameweek: gw, accuracyPct: +acc.toFixed(1) };
-  });
+  const weeklyAccuracy: { gameweek: number; accuracyPct: number }[] = [];
 
   const data = GetDashboardSummaryResponse.parse({
-    currentGameweek: 13,
+    currentGameweek: gw,
     liveMatches: liveCount,
     todaysMatches: todaysCount,
-    topScorer: {
-      playerName: topScorerP.name,
-      teamShortName: topScorerTeam.shortName,
-      goals: topScorerP.goals,
-    },
-    topAssister: {
-      playerName: topAssisterP.name,
-      teamShortName: topAssisterTeam.shortName,
-      assists: topAssisterP.assists,
-    },
+    topScorer,
+    topAssister,
     leader: {
-      teamShortName: leader.teamShortName,
-      points: leader.points,
+      teamShortName: leader?.teamShortName ?? "—",
+      points: leader?.points ?? 0,
     },
-    modelAccuracy: {
-      totalPredictions,
-      correctPredictions,
-      accuracyPct,
-      roi,
-    },
+    modelAccuracy: { totalPredictions, correctPredictions, accuracyPct, roi },
     weeklyAccuracy,
+    dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 300 },
   });
   res.json(data);
-});
+}));
 
 export default router;

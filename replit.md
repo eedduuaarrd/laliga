@@ -37,22 +37,42 @@ A comprehensive real-time La Liga analytics and prediction platform built on thi
 
 ### Backend layout
 
+### Live data source (v0.2.0 — April 2026 rewrite)
+
+**All data is now LIVE from ESPN's public soccer APIs.** No in-memory seed, no fabricated stats.
+
+- `artifacts/api-server/src/lib/espn.ts` — typed HTTPS client for ESPN's `site.api.espn.com/apis/site/v2/sports/soccer/esp.1/...` and `sports.core.api.espn.com/v2/.../seasons/{year}/teams/{id}/athletes` endpoints. No API key required.
+- `artifacts/api-server/src/lib/cache.ts` — in-memory TTL cache (60s default; 5min for rosters; 24h for player career meta) to keep ESPN happy.
 - `artifacts/api-server/src/data/`
-  - `teams.ts` — 20 La Liga teams with attack/defense/home-advantage strengths and crest URLs.
-  - `players.ts` — Full Real Madrid, Barcelona, Atlético squads + generic squads for the rest of the league.
-  - `standings.ts` — Hand-tuned 2025-26 standings after 12 matchdays with form arrays and home/away splits.
-  - `matches.ts` — Round-robin schedule, finished GW1-12, live GW13 (2 in-play), upcoming GW14-16.
-  - `lineups.ts` — Lineup builder by formation, match stats, momentum series, events, referee stats.
-  - `injuries.ts` — Injuries and suspensions with severity and impact scores.
-  - `predictions.ts` — Poisson prediction engine with form, absence, and H2H factors plus market-odds value calc.
-- `artifacts/api-server/src/routes/` — One file per resource (teams, standings, matches, predictions, players, injuries, h2h, value-bets, briefing, dashboard); each route validates its response with the generated Zod schema from `@workspace/api-zod`.
+  - `teams.ts` — fetches `teams` index + per-team `roster`. Manager comes from coaches array; founded/stadium nullable when ESPN doesn't expose them.
+  - `players.ts` — derives season goals/assists/appearances from `/teams/{id}/athletes/{playerId}/statistics`. Headshot URL via athletes index. Shirt number/age nullable per ESPN.
+  - `standings.ts` — `/standings` with current matchday gameweek extraction. Home/away splits left as 0 because soccer endpoints don't expose `homeWins` etc.
+  - `matches.ts` — scoreboard + summary endpoints. Status mapped to `scheduled|live|finished`. Real kickoffs, scores, and venue.
+  - `lineups.ts` — predicted XI by formation when ESPN doesn't supply official lineups (mostly does for in-progress/finished matches).
+  - `injuries.ts` — `/teams/{id}/injuries`. Severity normalised to `low|medium|high`.
+  - `predictions.ts` — **bookmaker-blended Poisson model**. Pulls `pickcenter` (DraftKings odds) when available, blends 70% market / 30% Poisson on team xG. Player props derived from real season per-game rates × predicted team xG. `Prediction.source` = `bookmaker` or `model`; `bookmaker` and `oddsLastUpdate` exposed to the UI.
+- `artifacts/api-server/src/routes/` — One file per resource. New endpoints added in v0.2.0:
+  - `GET /api/predictions/{matchId}/players` → anytime scorer / 2+ goals / anytime assist / G+A probabilities per player.
+  - `GET /api/predictions/{matchId}/lineups` → probable XI + bench per side with formation and confidence.
 - All routes are mounted under `/api`.
 
 ### Frontend pages
 
-Dashboard, Morning Briefing, Matches (list + detail), Predictions (list + detail with Poisson heatmap), Standings, Teams (grid + detail), Players (list + radar/recent-form detail), Value Bets, Injuries.
+Dashboard, Morning Briefing, Matches (list + detail), Predictions (list + detail with Poisson heatmap, BTTS / Over 2.5 / Clean Sheets, probable lineups, player props), Standings, Teams (grid + detail), Players (list + radar/recent-form detail), Value Bets, Injuries.
+
+The frontend layout shows a persistent **"Live Market Data · ESPN public APIs"** badge in the topbar. Predictions detail surfaces the data source (`Bookmaker · DraftKings` vs `Model · Poisson`) and the time the odds were last refreshed.
+
+### Honesty rules (no fabricated data)
+
+- `dashboard.modelAccuracy` returns zeros — no backtest yet, so we don't invent it.
+- `dashboard.topScorer` / `topAssister` return `—` when ESPN's leader endpoints are empty for the league cache window.
+- `referee` stats per match return zeros (not in ESPN public data).
+- `match.events` and `match.momentum` return `[]` when ESPN doesn't supply them (typically pre-match).
+- Match props (corners/cards/offsides) are modelled from xG and clearly labelled as modelled, not real bookmaker quotes.
 
 ### Notes
 
-- "Today" is anchored to April 24, 2026 in the seed data.
-- Free tier: no live API integrations; in-memory data is intentional.
+- "Today" is anchored to whatever ESPN considers the current matchday for `esp.1` (Spanish La Liga).
+- Free tier: no third-party connectors. Direct HTTPS to ESPN's public APIs only.
+- API Server boots on `PORT=8080`. Frontend Vite dev server on `PORT=22546` (mapped to external 3000 by `.replit`).
+- Both `dev` scripts in `artifacts/{api-server,laliga-pro}/package.json` set `PORT` and `BASE_PATH` defaults so the workflows work out of the box.

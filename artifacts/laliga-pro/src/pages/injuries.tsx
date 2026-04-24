@@ -56,7 +56,7 @@ export default function Injuries() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                       <span className={`text-xs font-bold ${injury.severity === 'major' ? 'text-destructive' : injury.severity === 'moderate' ? 'text-orange-500' : 'text-muted-foreground'}`}>
+                       <span className={`text-xs font-bold ${injury.severity === 'high' ? 'text-destructive' : injury.severity === 'medium' ? 'text-orange-500' : 'text-muted-foreground'}`}>
                          {injury.severity.toUpperCase()}
                        </span>
                     </TableCell>

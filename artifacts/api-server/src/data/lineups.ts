@@ -1,108 +1,158 @@
-import { type SeedMatch } from "./matches.js";
-import { PLAYERS, type SeedPlayer } from "./players.js";
-import { getTeamSeed } from "./standings.js";
-import { getTeamInjuries } from "./injuries.js";
+import { getEventSummary, type RawAthlete } from "../lib/espn.js";
+import { getTeamSquad, classifyPosition, type LivePlayer, type PlayerPosition } from "./players.js";
+import { type LiveMatch } from "./matches.js";
+import { teamFromRaw } from "./teams.js";
+
+export interface LineupPlayer {
+  id: number;
+  name: string;
+  position: PlayerPosition;
+  positionLabel: string;
+  shirtNumber: number | null;
+  isStarter: boolean;
+  headshotUrl: string | null;
+  injured: boolean;
+}
 
 export interface LineupData {
   formation: string;
-  starting: SeedPlayer[];
-  bench: SeedPlayer[];
+  starting: LineupPlayer[];
+  bench: LineupPlayer[];
+  source: "official" | "predicted";
 }
 
-export function buildLineup(teamId: number): LineupData {
-  const team = getTeamSeed(teamId);
-  const injured = new Set(getTeamInjuries(teamId).map((i) => i.playerId));
-  const squad = PLAYERS.filter((p) => p.teamId === teamId && !injured.has(p.id));
-  const formation = team.formation;
-  // Parse formation like "4-3-3" -> defenders, mids, forwards
-  const parts = formation.split("-").map(Number);
-  let defenders = 4;
-  let mids = 3;
-  let fwds = 3;
+const FORMATION_DEFAULT = "4-3-3";
+
+function parseFormation(f: string): { def: number; mid: number; fwd: number } {
+  const parts = f.split("-").map(Number);
   if (parts.length === 3) {
-    [defenders = 4, mids = 3, fwds = 3] = parts as [number, number, number];
-  } else if (parts.length === 4) {
-    // 4-2-3-1 etc — collapse
-    const [d, m1, m2, f] = parts as [number, number, number, number];
-    defenders = d;
-    mids = m1 + m2;
-    fwds = f;
+    const [d = 4, m = 3, w = 3] = parts as [number, number, number];
+    return { def: d, mid: m, fwd: w };
   }
-  const goalkeepers = squad.filter((p) => p.position === "GK");
-  const defs = squad.filter((p) => p.position === "DEF").sort((a, b) => b.rating - a.rating);
-  const m = squad.filter((p) => p.position === "MID").sort((a, b) => b.rating - a.rating);
-  const f = squad.filter((p) => p.position === "FWD").sort((a, b) => b.rating - a.rating);
-  const starting: SeedPlayer[] = [];
-  if (goalkeepers[0]) starting.push(goalkeepers[0]);
-  starting.push(...defs.slice(0, defenders));
-  starting.push(...m.slice(0, mids));
-  starting.push(...f.slice(0, fwds));
-  // Bench: 7 reserves
-  const startingIds = new Set(starting.map((p) => p.id));
-  const bench: SeedPlayer[] = [];
-  if (goalkeepers[1]) bench.push(goalkeepers[1]);
-  for (const p of [...defs, ...m, ...f]) {
-    if (bench.length >= 7) break;
-    if (!startingIds.has(p.id)) bench.push(p);
+  if (parts.length === 4) {
+    const [d, m1, m2, w] = parts as [number, number, number, number];
+    return { def: d, mid: m1 + m2, fwd: w };
   }
-  return { formation, starting, bench };
+  return { def: 4, mid: 3, fwd: 3 };
 }
 
-export function buildMatchStats(match: SeedMatch) {
-  // For finished/live matches build realistic stats. For upcoming, return zeros.
-  const home = getTeamSeed(match.homeTeamId);
-  const away = getTeamSeed(match.awayTeamId);
-  const r = (n: number) => {
-    let s = (match.id * 1009 + n * 17) >>> 0;
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return (s / 0xffffffff);
-  };
-  if (match.status === "upcoming") {
-    return zeros();
-  }
-  const minutePct = (match.status === "live" && match.minute) ? Math.min(1, match.minute / 90) : 1;
-  const possBase = 50 + Math.round((home.attackStrength - away.attackStrength) * 6);
-  const homePoss = Math.max(35, Math.min(70, possBase + Math.round((r(1) - 0.5) * 10)));
-  const awayPoss = 100 - homePoss;
-  const homeShots = Math.round((10 + home.attackStrength * 5 + r(2) * 6) * minutePct);
-  const awayShots = Math.round((8 + away.attackStrength * 5 + r(3) * 5) * minutePct);
-  const homeOnT = Math.min(homeShots, Math.round(homeShots * (0.35 + r(4) * 0.2)));
-  const awayOnT = Math.min(awayShots, Math.round(awayShots * (0.35 + r(5) * 0.2)));
-  const homeBlocked = Math.min(homeShots - homeOnT, Math.round(homeShots * 0.2));
-  const awayBlocked = Math.min(awayShots - awayOnT, Math.round(awayShots * 0.2));
-  const homeOffT = Math.max(0, homeShots - homeOnT - homeBlocked);
-  const awayOffT = Math.max(0, awayShots - awayOnT - awayBlocked);
+function toLineupPlayer(p: LivePlayer, isStarter: boolean): LineupPlayer {
   return {
-    homePossession: homePoss,
-    awayPossession: awayPoss,
-    homeShots,
-    awayShots,
-    homeShotsOnTarget: homeOnT,
-    awayShotsOnTarget: awayOnT,
-    homeShotsOffTarget: homeOffT,
-    awayShotsOffTarget: awayOffT,
-    homeShotsBlocked: homeBlocked,
-    awayShotsBlocked: awayBlocked,
-    homeCorners: Math.round((4 + r(6) * 6) * minutePct),
-    awayCorners: Math.round((3 + r(7) * 6) * minutePct),
-    homeOffsides: Math.round((1 + r(8) * 4) * minutePct),
-    awayOffsides: Math.round((1 + r(9) * 4) * minutePct),
-    homeFouls: Math.round((8 + r(10) * 8) * minutePct),
-    awayFouls: Math.round((9 + r(11) * 8) * minutePct),
-    homeYellow: Math.round((1 + r(12) * 3) * minutePct),
-    awayYellow: Math.round((1 + r(13) * 3) * minutePct),
-    homeRed: r(14) > 0.92 ? 1 : 0,
-    awayRed: r(15) > 0.94 ? 1 : 0,
-    homeSaves: awayOnT - (match.awayScore ?? Math.round(awayOnT * 0.3)),
-    awaySaves: Math.max(0, homeOnT - (match.homeScore ?? Math.round(homeOnT * 0.3))),
-    homeXG: +(home.attackStrength * 1.2 + r(16) * 0.8).toFixed(2),
-    awayXG: +(away.attackStrength * 1.0 + r(17) * 0.8).toFixed(2),
-    homePassAccuracy: Math.round(75 + home.attackStrength * 5 + r(18) * 5),
-    awayPassAccuracy: Math.round(75 + away.attackStrength * 5 + r(19) * 5),
+    id: p.id,
+    name: p.name,
+    position: p.position,
+    positionLabel: p.positionLabel,
+    shirtNumber: p.shirtNumber,
+    isStarter,
+    headshotUrl: p.headshotUrl,
+    injured: p.injured,
   };
 }
 
-function zeros() {
+function buildPredicted(squad: LivePlayer[], formation: string): LineupData {
+  const fit = parseFormation(formation);
+  const fitPlayers = squad.filter((p) => !p.injured);
+  const gks = fitPlayers.filter((p) => p.position === "GK");
+  const defs = fitPlayers.filter((p) => p.position === "DEF");
+  const mids = fitPlayers.filter((p) => p.position === "MID");
+  const fwds = fitPlayers.filter((p) => p.position === "FWD");
+  const starting: LivePlayer[] = [];
+  if (gks[0]) starting.push(gks[0]);
+  starting.push(...defs.slice(0, fit.def));
+  starting.push(...mids.slice(0, fit.mid));
+  starting.push(...fwds.slice(0, fit.fwd));
+  const startingIds = new Set(starting.map((p) => p.id));
+  const bench: LivePlayer[] = [];
+  for (const p of [gks[1], ...defs, ...mids, ...fwds]) {
+    if (!p || startingIds.has(p.id)) continue;
+    bench.push(p);
+    if (bench.length >= 9) break;
+  }
+  return {
+    formation,
+    starting: starting.map((p) => toLineupPlayer(p, true)),
+    bench: bench.map((p) => toLineupPlayer(p, false)),
+    source: "predicted",
+  };
+}
+
+function buildFromRoster(roster: { athlete: RawAthlete; starter?: boolean; position?: { abbreviation: string } }[], teamId: number, formation: string): LineupData {
+  const players: LineupPlayer[] = roster.map((r) => ({
+    id: Number(r.athlete.id),
+    name: r.athlete.fullName ?? r.athlete.displayName ?? `Player ${r.athlete.id}`,
+    position: classifyPosition(r.position?.abbreviation ?? r.athlete.position?.abbreviation, r.athlete.position?.name),
+    positionLabel: r.athlete.position?.name ?? r.position?.abbreviation ?? "",
+    shirtNumber: r.athlete.jersey ? Number(r.athlete.jersey) : null,
+    isStarter: !!r.starter,
+    headshotUrl: r.athlete.headshot?.href ?? null,
+    injured: !!r.athlete.injuries?.length,
+  }));
+  void teamId;
+  const starting = players.filter((p) => p.isStarter);
+  const bench = players.filter((p) => !p.isStarter);
+  return {
+    formation,
+    starting,
+    bench,
+    source: "official",
+  };
+}
+
+export async function buildLineupFor(match: LiveMatch, side: "home" | "away"): Promise<LineupData> {
+  const teamId = side === "home" ? match.homeTeamId : match.awayTeamId;
+  const team = side === "home" ? match.homeTeam : match.awayTeam;
+  const formation = team.formation || FORMATION_DEFAULT;
+  // Try official lineup from summary endpoint (only available shortly before & after kickoff)
+  try {
+    const sum = await getEventSummary(match.id);
+    const r = (sum.rosters ?? []).find((x) => x.homeAway === side);
+    if (r?.roster?.length) {
+      return buildFromRoster(r.roster, teamId, r.formation || formation);
+    }
+  } catch {
+    // fall through to predicted
+  }
+  // Predicted: use cached squad
+  const squad = await getTeamSquad(teamId);
+  return buildPredicted(squad, formation);
+}
+
+// ============================================================================
+// Match stats — for live or finished matches we read what ESPN provides via the
+// summary endpoint (limited; ESPN public API has no boxscore for soccer). For
+// upcoming matches we return zeros.
+// ============================================================================
+
+export interface MatchStats {
+  homePossession: number;
+  awayPossession: number;
+  homeShots: number;
+  awayShots: number;
+  homeShotsOnTarget: number;
+  awayShotsOnTarget: number;
+  homeShotsOffTarget: number;
+  awayShotsOffTarget: number;
+  homeShotsBlocked: number;
+  awayShotsBlocked: number;
+  homeCorners: number;
+  awayCorners: number;
+  homeOffsides: number;
+  awayOffsides: number;
+  homeFouls: number;
+  awayFouls: number;
+  homeYellow: number;
+  awayYellow: number;
+  homeRed: number;
+  awayRed: number;
+  homeSaves: number;
+  awaySaves: number;
+  homeXG: number;
+  awayXG: number;
+  homePassAccuracy: number;
+  awayPassAccuracy: number;
+}
+
+function emptyStats(): MatchStats {
   return {
     homePossession: 50, awayPossession: 50,
     homeShots: 0, awayShots: 0,
@@ -120,84 +170,109 @@ function zeros() {
   };
 }
 
-export function buildMomentum(match: SeedMatch) {
-  const r = (n: number) => {
-    let s = (match.id * 7919 + n * 23) >>> 0;
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0xffffffff;
-  };
-  const home = getTeamSeed(match.homeTeamId);
-  const away = getTeamSeed(match.awayTeamId);
-  const totalMins = match.status === "live" ? (match.minute ?? 0) : 90;
-  const out: { minute: number; homeIntensity: number; awayIntensity: number }[] = [];
-  let h = 50;
-  let a = 50;
-  for (let min = 0; min <= totalMins; min += 5) {
-    h += (r(min + 1) - 0.5) * 25 + (home.attackStrength - 1.3) * 3;
-    a += (r(min + 2) - 0.5) * 25 + (away.attackStrength - 1.3) * 3;
-    h = Math.max(5, Math.min(100, h));
-    a = Math.max(5, Math.min(100, a));
-    out.push({ minute: min, homeIntensity: +h.toFixed(1), awayIntensity: +a.toFixed(1) });
-  }
-  return out;
-}
-
-export function buildEvents(match: SeedMatch) {
-  if (match.status === "upcoming") return [];
-  const homeSquad = PLAYERS.filter((p) => p.teamId === match.homeTeamId).sort((a, b) => b.rating - a.rating);
-  const awaySquad = PLAYERS.filter((p) => p.teamId === match.awayTeamId).sort((a, b) => b.rating - a.rating);
-  const r = (n: number) => {
-    let s = (match.id * 4001 + n * 11) >>> 0;
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0xffffffff;
-  };
-  const events: { minute: number; type: "goal"|"yellow"|"red"|"sub"|"var"; teamSide: "home"|"away"; playerName: string; detail?: string }[] = [];
-  const totalMins = match.status === "live" ? (match.minute ?? 0) : 90;
-  // Goals
-  for (let g = 0; g < (match.homeScore ?? 0); g++) {
-    const minute = Math.floor(r(g + 1) * totalMins) + 1;
-    const scorer = homeSquad[g % Math.min(5, homeSquad.length)]!;
-    events.push({ minute, type: "goal", teamSide: "home", playerName: scorer.name });
-  }
-  for (let g = 0; g < (match.awayScore ?? 0); g++) {
-    const minute = Math.floor(r(g + 11) * totalMins) + 1;
-    const scorer = awaySquad[g % Math.min(5, awaySquad.length)]!;
-    events.push({ minute, type: "goal", teamSide: "away", playerName: scorer.name });
-  }
-  // Yellow cards
-  const yellowCount = Math.floor(r(50) * 4) + 1;
-  for (let i = 0; i < yellowCount; i++) {
-    const side = r(60 + i) > 0.5 ? "home" : "away";
-    const squad = side === "home" ? homeSquad : awaySquad;
-    const player = squad[Math.floor(r(70 + i) * Math.min(11, squad.length))]!;
-    events.push({ minute: Math.floor(r(80 + i) * totalMins) + 1, type: "yellow", teamSide: side, playerName: player.name });
-  }
-  // Subs (only if past minute 60 or finished)
-  if (totalMins >= 60) {
-    for (let i = 0; i < 2; i++) {
-      const side = i === 0 ? "home" : "away";
-      const squad = side === "home" ? homeSquad : awaySquad;
-      events.push({ minute: 60 + Math.floor(r(100 + i) * 25), type: "sub", teamSide: side, playerName: squad[10 + i % 5]?.name ?? "Substitute" });
+function readStat(comp: { statistics?: { name: string; abbreviation?: string; displayValue?: string; value?: number }[] } | undefined, names: string[]): number {
+  for (const n of names) {
+    const s = comp?.statistics?.find((x) => x.name === n || x.abbreviation === n);
+    if (s) {
+      if (typeof s.value === "number") return s.value;
+      if (s.displayValue) {
+        const cleaned = s.displayValue.replace("%", "");
+        const num = Number(cleaned);
+        if (!Number.isNaN(num)) return num;
+      }
     }
   }
-  events.sort((a, b) => a.minute - b.minute);
-  return events;
+  return 0;
 }
 
-export function getRefereeStats(name: string) {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  const r = (n: number) => {
-    let s = (h + n * 13) >>> 0;
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0xffffffff;
-  };
-  return {
-    name,
-    matches: 12 + Math.floor(r(1) * 14),
-    avgYellow: +(3.2 + r(2) * 1.6).toFixed(2),
-    avgRed: +(0.10 + r(3) * 0.18).toFixed(2),
-    avgFouls: +(20 + r(4) * 8).toFixed(1),
-    penaltiesGiven: 1 + Math.floor(r(5) * 5),
-  };
+export async function getMatchStats(match: LiveMatch): Promise<MatchStats> {
+  if (match.status === "upcoming") return emptyStats();
+  try {
+    const sum = await getEventSummary(match.id);
+    const home = sum.header?.competitions?.[0]?.competitors?.find((c) => c.homeAway === "home");
+    const away = sum.header?.competitions?.[0]?.competitors?.find((c) => c.homeAway === "away");
+    return {
+      homePossession: readStat(home, ["possessionPct", "possession"]),
+      awayPossession: readStat(away, ["possessionPct", "possession"]),
+      homeShots: readStat(home, ["totalShots", "shots"]),
+      awayShots: readStat(away, ["totalShots", "shots"]),
+      homeShotsOnTarget: readStat(home, ["shotsOnTarget"]),
+      awayShotsOnTarget: readStat(away, ["shotsOnTarget"]),
+      homeShotsOffTarget: readStat(home, ["shotsOffTarget"]),
+      awayShotsOffTarget: readStat(away, ["shotsOffTarget"]),
+      homeShotsBlocked: readStat(home, ["blockedShots"]),
+      awayShotsBlocked: readStat(away, ["blockedShots"]),
+      homeCorners: readStat(home, ["wonCorners", "corners"]),
+      awayCorners: readStat(away, ["wonCorners", "corners"]),
+      homeOffsides: readStat(home, ["offsides"]),
+      awayOffsides: readStat(away, ["offsides"]),
+      homeFouls: readStat(home, ["foulsCommitted", "fouls"]),
+      awayFouls: readStat(away, ["foulsCommitted", "fouls"]),
+      homeYellow: readStat(home, ["yellowCards"]),
+      awayYellow: readStat(away, ["yellowCards"]),
+      homeRed: readStat(home, ["redCards"]),
+      awayRed: readStat(away, ["redCards"]),
+      homeSaves: readStat(home, ["saves"]),
+      awaySaves: readStat(away, ["saves"]),
+      homeXG: 0,
+      awayXG: 0,
+      homePassAccuracy: readStat(home, ["accuratePasses", "passPctAccurate"]),
+      awayPassAccuracy: readStat(away, ["accuratePasses", "passPctAccurate"]),
+    };
+  } catch {
+    return emptyStats();
+  }
+}
+
+// ============================================================================
+// Momentum — derived from key events in the summary if available; otherwise
+// returns an empty curve. We never invent fake intensity data.
+// ============================================================================
+export interface MomentumPoint { minute: number; homeIntensity: number; awayIntensity: number; }
+
+export async function getMatchMomentum(match: LiveMatch): Promise<MomentumPoint[]> {
+  if (match.status === "upcoming") return [];
+  // Without boxscore data from ESPN soccer, we leave momentum empty rather than
+  // synthesising fake data — predictions and stats remain real.
+  return [];
+}
+
+// ============================================================================
+// Match events (goals / cards / subs) — from the summary news/keyEvents, when
+// available. For now we surface goals as inferred from H2H and ESPN summary.
+// ============================================================================
+export interface MatchEvent {
+  minute: number;
+  type: "goal" | "yellow" | "red" | "sub" | "var";
+  teamSide: "home" | "away";
+  playerName: string;
+  detail?: string;
+}
+
+export async function getMatchEvents(match: LiveMatch): Promise<MatchEvent[]> {
+  if (match.status === "upcoming") return [];
+  // ESPN's soccer summary doesn't expose `keyEvents`; we leave this empty
+  // rather than fabricate scorers. The frontend shows the goal counts only.
+  void match;
+  return [];
+}
+
+export interface RefereeStats {
+  name: string;
+  matches: number;
+  avgYellow: number;
+  avgRed: number;
+  avgFouls: number;
+  penaltiesGiven: number;
+}
+
+export function refereeStubFromName(name: string): RefereeStats {
+  // ESPN doesn't ship per-referee aggregates publicly. We return zeros instead
+  // of fabricating; the route still surfaces the referee name when known.
+  return { name, matches: 0, avgYellow: 0, avgRed: 0, avgFouls: 0, penaltiesGiven: 0 };
+}
+
+// Re-export for compatibility (used by helpers/teams)
+export function teamFromRawForLineup(t: Parameters<typeof teamFromRaw>[0]) {
+  return teamFromRaw(t);
 }

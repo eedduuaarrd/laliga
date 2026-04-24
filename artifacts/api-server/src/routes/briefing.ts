@@ -1,105 +1,120 @@
-import { Router, type IRouter } from "express";
-import { TEAMS, buildCrestUrl } from "../data/teams.js";
-import { getStandingsRows, getTeamSeed } from "../data/standings.js";
-import { getUpcomingPredictions } from "../data/predictions.js";
-import { INJURIES } from "../data/injuries.js";
-import { PLAYERS } from "../data/players.js";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { getMatchesByStatus } from "../data/matches.js";
+import { getStandingsRows } from "../data/standings.js";
+import { predictMatch, type MatchPrediction } from "../data/predictions.js";
+import { getAllInjuries } from "../data/injuries.js";
+import { type LiveTeam } from "../data/teams.js";
 import { GetMorningBriefingResponse } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
 
-function teamWithCrest(teamId: number) {
-  const team = TEAMS.find((t) => t.id === teamId)!;
+function shapeTeam(t: LiveTeam) {
   return {
-    id: team.id,
-    name: team.name,
-    shortName: team.shortName,
-    city: team.city,
-    founded: team.founded,
-    stadium: team.stadium,
-    primaryColor: team.primaryColor,
-    secondaryColor: team.secondaryColor,
-    crestUrl: buildCrestUrl(team),
-    manager: team.manager,
-    formation: team.formation,
+    id: t.id,
+    name: t.name,
+    shortName: t.shortName,
+    abbreviation: t.abbreviation,
+    city: t.city,
+    founded: t.founded,
+    stadium: t.stadium,
+    primaryColor: t.primaryColor,
+    secondaryColor: t.secondaryColor,
+    crestUrl: t.crestUrl,
+    manager: t.manager,
+    formation: t.formation,
   };
 }
 
-router.get("/briefing", (_req, res) => {
+function shapePred(p: MatchPrediction, home: LiveTeam, away: LiveTeam) {
+  return {
+    matchId: p.matchId,
+    kickoff: p.kickoff,
+    homeTeam: shapeTeam(home),
+    awayTeam: shapeTeam(away),
+    homeWinProb: p.homeWinProb,
+    drawProb: p.drawProb,
+    awayWinProb: p.awayWinProb,
+    expectedHomeGoals: p.expectedHomeGoals,
+    expectedAwayGoals: p.expectedAwayGoals,
+    bttsProb: p.bttsProb,
+    over25Prob: p.over25Prob,
+    under25Prob: p.under25Prob,
+    cleanSheetHome: p.cleanSheetHome,
+    cleanSheetAway: p.cleanSheetAway,
+    confidence: p.confidence,
+    recommendation: p.recommendation,
+    source: p.source,
+    bookmaker: p.bookmaker,
+    oddsLastUpdate: p.oddsLastUpdate,
+  };
+}
+
+router.get("/briefing", wrap(async (_req, res) => {
   const today = new Date().toISOString().split("T")[0]!;
-  const standings = getStandingsRows();
-  const leader = standings[0]!;
-  const second = standings[1]!;
-  const gap = leader.points - second.points;
-  const headline = `${leader.teamName} hold ${gap}-point edge over ${second.teamName} ahead of crucial week`;
+  const [standings, upcoming, injuries] = await Promise.all([
+    getStandingsRows(),
+    getMatchesByStatus("upcoming"),
+    getAllInjuries(),
+  ]);
+  const leader = standings[0];
+  const second = standings[1];
+  const gap = (leader?.points ?? 0) - (second?.points ?? 0);
+  const headline = leader && second
+    ? `${leader.teamName} hold ${gap}-point edge over ${second.teamName} ahead of crucial week`
+    : "La Liga matchday preview";
 
-  const allPreds = getUpcomingPredictions();
-  // Top picks: 3 highest-confidence predictions
-  const topPicks = allPreds.slice(0, 3).map((p) => ({
-    matchId: p.matchId,
-    kickoff: p.kickoff,
-    homeTeam: teamWithCrest(p.homeTeamId),
-    awayTeam: teamWithCrest(p.awayTeamId),
-    homeWinProb: p.homeWinProb,
-    drawProb: p.drawProb,
-    awayWinProb: p.awayWinProb,
-    expectedHomeGoals: p.expectedHomeGoals,
-    expectedAwayGoals: p.expectedAwayGoals,
-    confidence: p.confidence,
-    recommendation: p.recommendation,
-  }));
+  // Build predictions for the next ~8 matches.
+  const head = upcoming.slice(0, 8);
+  const built = await Promise.all(
+    head.map((m) =>
+      predictMatch(m)
+        .then((r) => ({ m, p: r.prediction }))
+        .catch(() => null),
+    ),
+  );
+  const allPreds = built.filter((x): x is { m: typeof head[number]; p: MatchPrediction } => x != null);
 
-  // Upset watch: predictions where draw or away has surprisingly high probability vs implied favorites
-  // We'll surface 3 matches with the smallest spread between top and second outcome
-  const sortedBySpread = [...allPreds].sort((a, b) => {
-    const spreadA = Math.max(a.homeWinProb, a.drawProb, a.awayWinProb) - Math.min(a.homeWinProb, a.drawProb, a.awayWinProb);
-    const spreadB = Math.max(b.homeWinProb, b.drawProb, b.awayWinProb) - Math.min(b.homeWinProb, b.drawProb, b.awayWinProb);
-    return spreadA - spreadB;
-  });
-  const upsetWatch = sortedBySpread.slice(0, 3).map((p) => ({
-    matchId: p.matchId,
-    kickoff: p.kickoff,
-    homeTeam: teamWithCrest(p.homeTeamId),
-    awayTeam: teamWithCrest(p.awayTeamId),
-    homeWinProb: p.homeWinProb,
-    drawProb: p.drawProb,
-    awayWinProb: p.awayWinProb,
-    expectedHomeGoals: p.expectedHomeGoals,
-    expectedAwayGoals: p.expectedAwayGoals,
-    confidence: p.confidence,
-    recommendation: p.recommendation,
-  }));
+  // Top picks by confidence
+  const topPicks = [...allPreds]
+    .sort((a, b) => b.p.confidence - a.p.confidence)
+    .slice(0, 3)
+    .map((x) => shapePred(x.p, x.m.homeTeam, x.m.awayTeam));
 
-  // Key absences: top 3 by impact
-  const keyAbsences = [...INJURIES]
-    .sort((a, b) => b.impactScore - a.impactScore)
-    .slice(0, 3);
+  // Upset watch: tightest 3-way splits
+  const upsetWatch = [...allPreds]
+    .sort((a, b) => {
+      const sA = Math.max(a.p.homeWinProb, a.p.drawProb, a.p.awayWinProb) - Math.min(a.p.homeWinProb, a.p.drawProb, a.p.awayWinProb);
+      const sB = Math.max(b.p.homeWinProb, b.p.drawProb, b.p.awayWinProb) - Math.min(b.p.homeWinProb, b.p.drawProb, b.p.awayWinProb);
+      return sA - sB;
+    })
+    .slice(0, 3)
+    .map((x) => shapePred(x.p, x.m.homeTeam, x.m.awayTeam));
 
-  const summary = `Matchday 13 is underway in La Liga with title implications across the table. ${leader.teamName} look to extend their advantage while ${second.teamName} stalk in second. The model has flagged ${topPicks.length} high-confidence picks and ${upsetWatch.length} matches where an upset is statistically plausible. Several heavyweight absences could swing momentum — track every injury report before the whistle.`;
+  const keyAbsences = [...injuries].sort((a, b) => b.impactScore - a.impactScore).slice(0, 3);
+  const summary = `Live La Liga snapshot from ESPN: ${allPreds.length} upcoming matches modelled with real bookmaker odds blended into our Poisson engine. ${topPicks.length} high-confidence picks and ${upsetWatch.length} potential upsets identified. Track key absences before kickoff.`;
 
   const topPick = topPicks[0];
-  const topAbsence = keyAbsences[0];
-  const topAbsencePlayer = topAbsence ? PLAYERS.find((p) => p.id === topAbsence.playerId) : undefined;
-  const topAbsenceTeam = topAbsencePlayer ? TEAMS.find((t) => t.id === topAbsencePlayer.teamId) : undefined;
   const topUpset = upsetWatch[0];
-
+  const topAbs = keyAbsences[0];
   const keyStorylines = [
-    {
+    leader && second ? {
       title: "Title race tightens",
-      body: `${leader.teamName} sit on ${leader.points} points with a goal difference of ${leader.goalDifference >= 0 ? "+" : ""}${leader.goalDifference}, just ${gap} clear of ${second.teamName}. Every dropped point now reverberates across the chase.`,
-    },
+      body: `${leader.teamName} sit on ${leader.points} points (GD ${leader.goalDifference >= 0 ? "+" : ""}${leader.goalDifference}), ${gap} clear of ${second.teamName}.`,
+    } : { title: "Standings settling", body: "Live La Liga table loaded from ESPN." },
     topPick ? {
       title: "Model's strongest call",
-      body: `${getTeamSeed(topPick.homeTeam.id).shortName} vs ${getTeamSeed(topPick.awayTeam.id).shortName} is the cleanest read on the slate. Recommendation: ${topPick.recommendation} at ${(topPick.confidence * 100).toFixed(1)}% confidence, with expected goals of ${topPick.expectedHomeGoals.toFixed(2)}-${topPick.expectedAwayGoals.toFixed(2)}.`,
-    } : { title: "Quiet board", body: "No standout fixtures from the model this week." },
+      body: `${topPick.homeTeam.shortName} vs ${topPick.awayTeam.shortName}: ${topPick.recommendation} at ${(topPick.confidence * 100).toFixed(1)}% confidence (xG ${topPick.expectedHomeGoals.toFixed(2)}-${topPick.expectedAwayGoals.toFixed(2)})${topPick.bookmaker ? `, source ${topPick.bookmaker}` : ""}.`,
+    } : { title: "Quiet board", body: "No upcoming fixtures in the rolling window." },
     topUpset ? {
       title: "Upset radar",
-      body: `${getTeamSeed(topUpset.homeTeam.id).shortName} vs ${getTeamSeed(topUpset.awayTeam.id).shortName} grades as the most unpredictable fixture this week — three-way market split with no probability separating from the pack.`,
+      body: `${topUpset.homeTeam.shortName} vs ${topUpset.awayTeam.shortName} is the tightest market: ${(topUpset.homeWinProb * 100).toFixed(0)}% / ${(topUpset.drawProb * 100).toFixed(0)}% / ${(topUpset.awayWinProb * 100).toFixed(0)}%.`,
     } : { title: "Predictable slate", body: "No high-variance matchups identified." },
-    topAbsence && topAbsencePlayer && topAbsenceTeam ? {
+    topAbs ? {
       title: "Key absence to track",
-      body: `${topAbsencePlayer.name} (${topAbsenceTeam.shortName}) is the highest-impact name on the injury list with a model impact score of ${topAbsence.impactScore.toFixed(2)} — return ${topAbsence.expectedReturn}.`,
-    } : { title: "Squads near full strength", body: "No major absences reported." },
+      body: `${topAbs.playerName} (${topAbs.teamShortName}) leads the impact list — status ${topAbs.status}.`,
+    } : { title: "Squads near full strength", body: "No major absences flagged on ESPN rosters." },
   ];
 
   const data = GetMorningBriefingResponse.parse({
@@ -111,6 +126,6 @@ router.get("/briefing", (_req, res) => {
     keyStorylines,
   });
   res.json(data);
-});
+}));
 
 export default router;

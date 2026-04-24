@@ -2,8 +2,8 @@ openapi: 3.1.0
 info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
-  description: La Liga Football Analytics & Prediction API
+  version: 0.2.0
+  description: La Liga Pro Analytics — live data backed by ESPN public sports APIs
 servers:
   - url: /api
     description: Base API path
@@ -34,7 +34,7 @@ paths:
     get:
       operationId: listTeams
       tags: [teams]
-      summary: List all La Liga teams
+      summary: List all La Liga teams (live from ESPN)
       responses:
         "200":
           description: Teams
@@ -64,7 +64,7 @@ paths:
     get:
       operationId: getStandings
       tags: [standings]
-      summary: La Liga standings with home/away splits and advanced metrics
+      summary: La Liga standings (live from ESPN)
       responses:
         "200":
           description: Standings table
@@ -78,7 +78,7 @@ paths:
     get:
       operationId: listMatches
       tags: [matches]
-      summary: List matches filtered by status and/or gameweek
+      summary: List matches filtered by status and/or gameweek (live from ESPN)
       parameters:
         - in: query
           name: status
@@ -119,7 +119,7 @@ paths:
     get:
       operationId: listPredictions
       tags: [predictions]
-      summary: AI predictions for upcoming matches
+      summary: AI predictions for upcoming matches (real bookmaker probs blended with team-rate Poisson model)
       responses:
         "200":
           description: Predictions
@@ -132,7 +132,7 @@ paths:
     get:
       operationId: getPrediction
       tags: [predictions]
-      summary: Detailed prediction (Poisson, form, H2H, absences, value)
+      summary: Detailed match prediction (Poisson, form, H2H, absences, market value, props)
       parameters:
         - in: path
           name: matchId
@@ -144,12 +144,44 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PredictionDetail" }
+  /predictions/{matchId}/players:
+    get:
+      operationId: getPlayerProps
+      tags: [predictions]
+      summary: Per-player prop predictions for a match (anytime scorer, assist, goal contribution)
+      parameters:
+        - in: path
+          name: matchId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Per-player predictions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayerPropsResponse" }
+  /predictions/{matchId}/lineups:
+    get:
+      operationId: getProbableLineups
+      tags: [predictions]
+      summary: Probable starting XI and bench for both sides
+      parameters:
+        - in: path
+          name: matchId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Probable lineups
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProbableLineupsResponse" }
 
   /players:
     get:
       operationId: listPlayers
       tags: [players]
-      summary: Top La Liga players (filterable)
+      summary: La Liga players (filterable by team / position)
       parameters:
         - in: query
           name: teamId
@@ -188,7 +220,7 @@ paths:
     get:
       operationId: listInjuries
       tags: [injuries]
-      summary: Active injuries and suspensions across La Liga
+      summary: Active injuries / suspensions across La Liga (live from ESPN rosters)
       responses:
         "200":
           description: Injuries
@@ -223,7 +255,7 @@ paths:
     get:
       operationId: listValueBets
       tags: [insights]
-      summary: Value betting opportunities (AI vs market odds)
+      summary: Value betting opportunities (real bookmaker odds vs model probability)
       responses:
         "200":
           description: Value bets
@@ -237,7 +269,7 @@ paths:
     get:
       operationId: getMorningBriefing
       tags: [insights]
-      summary: Today's La Liga briefing — most predictable matches and storylines
+      summary: Today's La Liga briefing — live storylines and top picks
       responses:
         "200":
           description: Briefing
@@ -249,7 +281,7 @@ paths:
     get:
       operationId: getDashboardSummary
       tags: [dashboard]
-      summary: Dashboard top-level metrics
+      summary: Dashboard top-level metrics (live)
       responses:
         "200":
           description: Dashboard summary
@@ -265,21 +297,31 @@ components:
         status: { type: string }
       required: [status]
 
+    DataSource:
+      type: object
+      description: Provenance metadata for live data fetched from ESPN.
+      properties:
+        provider: { type: string, description: "Upstream data provider (e.g. ESPN, DraftKings)" }
+        fetchedAt: { type: string, format: date-time }
+        cacheTtlSeconds: { type: integer }
+      required: [provider, fetchedAt]
+
     Team:
       type: object
       properties:
         id: { type: integer }
         name: { type: string }
         shortName: { type: string }
+        abbreviation: { type: string }
         city: { type: string }
-        founded: { type: integer }
+        founded: { type: integer, nullable: true }
         stadium: { type: string }
         primaryColor: { type: string }
         secondaryColor: { type: string }
         crestUrl: { type: string }
         manager: { type: string }
         formation: { type: string }
-      required: [id, name, shortName, city, founded, stadium, primaryColor, secondaryColor, crestUrl, manager, formation]
+      required: [id, name, shortName, abbreviation, city, stadium, primaryColor, secondaryColor, crestUrl, manager, formation]
 
     TeamDetail:
       type: object
@@ -303,6 +345,7 @@ components:
         upcomingMatches:
           type: array
           items: { $ref: "#/components/schemas/MatchSummary" }
+        dataSource: { $ref: "#/components/schemas/DataSource" }
       required: [team, position, points, played, wins, draws, losses, goalsFor, goalsAgainst, cleanSheets, form, squad, upcomingMatches]
 
     StandingRow:
@@ -346,6 +389,7 @@ components:
         gameweek: { type: integer }
         kickoff: { type: string, format: date-time }
         status: { type: string, enum: [live, upcoming, finished] }
+        statusDetail: { type: string }
         minute: { type: integer, nullable: true }
         homeTeam: { $ref: "#/components/schemas/Team" }
         awayTeam: { $ref: "#/components/schemas/Team" }
@@ -353,7 +397,7 @@ components:
         awayScore: { type: integer, nullable: true }
         venue: { type: string }
         referee: { type: string }
-      required: [id, gameweek, kickoff, status, homeTeam, awayTeam, venue, referee]
+      required: [id, gameweek, kickoff, status, statusDetail, homeTeam, awayTeam, venue, referee]
 
     MatchDetail:
       type: object
@@ -369,50 +413,65 @@ components:
           type: array
           items: { $ref: "#/components/schemas/MatchEvent" }
         refereeStats: { $ref: "#/components/schemas/RefereeStats" }
+        dataSource: { $ref: "#/components/schemas/DataSource" }
       required: [match, stats, homeLineup, awayLineup, momentum, events, refereeStats]
 
     MatchStats:
       type: object
       properties:
-        homePossession: { type: integer }
-        awayPossession: { type: integer }
-        homeShots: { type: integer }
-        awayShots: { type: integer }
-        homeShotsOnTarget: { type: integer }
-        awayShotsOnTarget: { type: integer }
-        homeShotsOffTarget: { type: integer }
-        awayShotsOffTarget: { type: integer }
-        homeShotsBlocked: { type: integer }
-        awayShotsBlocked: { type: integer }
-        homeCorners: { type: integer }
-        awayCorners: { type: integer }
-        homeOffsides: { type: integer }
-        awayOffsides: { type: integer }
-        homeFouls: { type: integer }
-        awayFouls: { type: integer }
-        homeYellow: { type: integer }
-        awayYellow: { type: integer }
-        homeRed: { type: integer }
-        awayRed: { type: integer }
-        homeSaves: { type: integer }
-        awaySaves: { type: integer }
+        homePossession: { type: number }
+        awayPossession: { type: number }
+        homeShots: { type: number }
+        awayShots: { type: number }
+        homeShotsOnTarget: { type: number }
+        awayShotsOnTarget: { type: number }
+        homeShotsOffTarget: { type: number }
+        awayShotsOffTarget: { type: number }
+        homeShotsBlocked: { type: number }
+        awayShotsBlocked: { type: number }
+        homeCorners: { type: number }
+        awayCorners: { type: number }
+        homeOffsides: { type: number }
+        awayOffsides: { type: number }
+        homeFouls: { type: number }
+        awayFouls: { type: number }
+        homeYellow: { type: number }
+        awayYellow: { type: number }
+        homeRed: { type: number }
+        awayRed: { type: number }
+        homeSaves: { type: number }
+        awaySaves: { type: number }
         homeXG: { type: number }
         awayXG: { type: number }
-        homePassAccuracy: { type: integer }
-        awayPassAccuracy: { type: integer }
+        homePassAccuracy: { type: number }
+        awayPassAccuracy: { type: number }
       required: [homePossession, awayPossession, homeShots, awayShots, homeShotsOnTarget, awayShotsOnTarget, homeShotsOffTarget, awayShotsOffTarget, homeShotsBlocked, awayShotsBlocked, homeCorners, awayCorners, homeOffsides, awayOffsides, homeFouls, awayFouls, homeYellow, awayYellow, homeRed, awayRed, homeSaves, awaySaves, homeXG, awayXG, homePassAccuracy, awayPassAccuracy]
 
     Lineup:
       type: object
       properties:
         formation: { type: string }
+        source: { type: string, enum: [official, predicted] }
         starting:
           type: array
-          items: { $ref: "#/components/schemas/Player" }
+          items: { $ref: "#/components/schemas/LineupPlayer" }
         bench:
           type: array
-          items: { $ref: "#/components/schemas/Player" }
-      required: [formation, starting, bench]
+          items: { $ref: "#/components/schemas/LineupPlayer" }
+      required: [formation, source, starting, bench]
+
+    LineupPlayer:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        position: { type: string, enum: [GK, DEF, MID, FWD] }
+        positionLabel: { type: string }
+        shirtNumber: { type: integer, nullable: true }
+        isStarter: { type: boolean }
+        headshotUrl: { type: string, nullable: true }
+        injured: { type: boolean }
+      required: [id, name, position, positionLabel, isStarter, injured]
 
     MomentumPoint:
       type: object
@@ -451,17 +510,23 @@ components:
         teamId: { type: integer }
         teamShortName: { type: string }
         position: { type: string, enum: [GK, DEF, MID, FWD] }
-        shirtNumber: { type: integer }
+        positionLabel: { type: string }
+        shirtNumber: { type: integer, nullable: true }
         nationality: { type: string }
-        age: { type: integer }
-        appearances: { type: integer }
-        goals: { type: integer }
-        assists: { type: integer }
-        keyPasses: { type: integer }
-        bigChancesCreated: { type: integer }
+        age: { type: integer, nullable: true }
+        headshotUrl: { type: string, nullable: true }
+        appearances: { type: number }
+        goals: { type: number }
+        assists: { type: number }
+        keyPasses: { type: number }
+        bigChancesCreated: { type: number }
+        shots: { type: number }
+        shotsOnTarget: { type: number }
         xG: { type: number }
         rating: { type: number }
-      required: [id, name, teamId, teamShortName, position, shirtNumber, nationality, age, appearances, goals, assists, keyPasses, bigChancesCreated, xG, rating]
+        injured: { type: boolean }
+        injuryStatus: { type: string, nullable: true }
+      required: [id, name, teamId, teamShortName, position, positionLabel, nationality, appearances, goals, assists, keyPasses, bigChancesCreated, shots, shotsOnTarget, xG, rating, injured]
 
     PlayerDetail:
       type: object
@@ -495,13 +560,16 @@ components:
         playerId: { type: integer }
         playerName: { type: string }
         teamId: { type: integer }
+        teamName: { type: string }
         teamShortName: { type: string }
-        type: { type: string, enum: [injury, suspension] }
+        position: { type: string, enum: [GK, DEF, MID, FWD] }
+        type: { type: string, enum: [injury, suspension, doubtful] }
+        status: { type: string }
         description: { type: string }
-        severity: { type: string, enum: [minor, moderate, major] }
-        expectedReturn: { type: string }
+        severity: { type: string, enum: [low, medium, high] }
+        expectedReturn: { type: string, nullable: true }
         impactScore: { type: number }
-      required: [id, playerId, playerName, teamId, teamShortName, type, description, severity, expectedReturn, impactScore]
+      required: [id, playerId, playerName, teamId, teamName, teamShortName, position, type, status, description, severity, impactScore]
 
     Prediction:
       type: object
@@ -515,9 +583,17 @@ components:
         awayWinProb: { type: number }
         expectedHomeGoals: { type: number }
         expectedAwayGoals: { type: number }
+        bttsProb: { type: number }
+        over25Prob: { type: number }
+        under25Prob: { type: number }
+        cleanSheetHome: { type: number }
+        cleanSheetAway: { type: number }
         confidence: { type: number }
         recommendation: { type: string }
-      required: [matchId, kickoff, homeTeam, awayTeam, homeWinProb, drawProb, awayWinProb, expectedHomeGoals, expectedAwayGoals, confidence, recommendation]
+        source: { type: string, enum: [bookmaker, team-rates, blended] }
+        bookmaker: { type: string, nullable: true }
+        oddsLastUpdate: { type: string, format: date-time }
+      required: [matchId, kickoff, homeTeam, awayTeam, homeWinProb, drawProb, awayWinProb, expectedHomeGoals, expectedAwayGoals, bttsProb, over25Prob, under25Prob, cleanSheetHome, cleanSheetAway, confidence, recommendation, source, oddsLastUpdate]
 
     PredictionDetail:
       type: object
@@ -565,18 +641,139 @@ components:
               type: array
               items: { $ref: "#/components/schemas/InjuryReport" }
           required: [homeImpact, awayImpact, homeMissing, awayMissing]
-        marketOdds:
+        marketOdds: { $ref: "#/components/schemas/MarketView" }
+        props: { $ref: "#/components/schemas/MatchProps" }
+        playerProps: { $ref: "#/components/schemas/PlayerPropsResponse" }
+        probableLineups: { $ref: "#/components/schemas/ProbableLineupsResponse" }
+        dataSource: { $ref: "#/components/schemas/DataSource" }
+      required: [base, scoreMatrix, topScorelines, formFactor, h2h, absenceImpact, marketOdds, props, playerProps, probableLineups]
+
+    MarketView:
+      type: object
+      properties:
+        homeOdds: { type: number }
+        drawOdds: { type: number }
+        awayOdds: { type: number }
+        valueHome: { type: number }
+        valueDraw: { type: number }
+        valueAway: { type: number }
+        bestPick: { type: string }
+        source: { type: string, enum: [bookmaker, model] }
+        bookmaker: { type: string, nullable: true }
+        overUnderLine: { type: number, nullable: true }
+        overOdds: { type: number, nullable: true }
+        underOdds: { type: number, nullable: true }
+      required: [homeOdds, drawOdds, awayOdds, valueHome, valueDraw, valueAway, bestPick, source]
+
+    MatchProps:
+      type: object
+      properties:
+        totalGoals:
           type: object
           properties:
-            homeOdds: { type: number }
-            drawOdds: { type: number }
-            awayOdds: { type: number }
-            valueHome: { type: number }
-            valueDraw: { type: number }
-            valueAway: { type: number }
-            bestPick: { type: string }
-          required: [homeOdds, drawOdds, awayOdds, valueHome, valueDraw, valueAway, bestPick]
-      required: [base, scoreMatrix, topScorelines, formFactor, h2h, absenceImpact, marketOdds]
+            line: { type: number }
+            expected: { type: number }
+            overProb: { type: number }
+            underProb: { type: number }
+          required: [line, expected, overProb, underProb]
+        totalCorners:
+          type: object
+          properties:
+            line: { type: number }
+            expected: { type: number }
+          required: [line, expected]
+        totalCards:
+          type: object
+          properties:
+            line: { type: number }
+            expected: { type: number }
+          required: [line, expected]
+        totalOffsides:
+          type: object
+          properties:
+            line: { type: number }
+            expected: { type: number }
+          required: [line, expected]
+        totalFouls:
+          type: object
+          properties:
+            line: { type: number }
+            expected: { type: number }
+          required: [line, expected]
+        bothTeamsToScore:
+          type: object
+          properties:
+            yesProb: { type: number }
+            noProb: { type: number }
+          required: [yesProb, noProb]
+        exactScore:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              probability: { type: number }
+            required: [label, probability]
+      required: [totalGoals, totalCorners, totalCards, totalOffsides, totalFouls, bothTeamsToScore, exactScore]
+
+    PlayerProp:
+      type: object
+      properties:
+        playerId: { type: integer }
+        playerName: { type: string }
+        teamId: { type: integer }
+        teamShortName: { type: string }
+        position: { type: string, enum: [GK, DEF, MID, FWD] }
+        positionLabel: { type: string }
+        headshotUrl: { type: string, nullable: true }
+        seasonGoals: { type: number }
+        seasonAssists: { type: number }
+        seasonAppearances: { type: number }
+        goalsPerGame: { type: number }
+        assistsPerGame: { type: number }
+        expectedGoals: { type: number }
+        expectedAssists: { type: number }
+        anytimeScorerProb: { type: number }
+        twoPlusGoalsProb: { type: number }
+        anytimeAssistProb: { type: number }
+        goalContributionProb: { type: number }
+      required: [playerId, playerName, teamId, teamShortName, position, positionLabel, seasonGoals, seasonAssists, seasonAppearances, goalsPerGame, assistsPerGame, expectedGoals, expectedAssists, anytimeScorerProb, twoPlusGoalsProb, anytimeAssistProb, goalContributionProb]
+
+    PlayerPropsResponse:
+      type: object
+      properties:
+        matchId: { type: integer }
+        home:
+          type: array
+          items: { $ref: "#/components/schemas/PlayerProp" }
+        away:
+          type: array
+          items: { $ref: "#/components/schemas/PlayerProp" }
+        dataSource: { $ref: "#/components/schemas/DataSource" }
+      required: [matchId, home, away]
+
+    ProbableLineup:
+      type: object
+      properties:
+        formation: { type: string }
+        source: { type: string, enum: [official, predicted] }
+        confidence: { type: number }
+        starting:
+          type: array
+          items: { $ref: "#/components/schemas/LineupPlayer" }
+        bench:
+          type: array
+          items: { $ref: "#/components/schemas/LineupPlayer" }
+      required: [formation, source, confidence, starting, bench]
+
+    ProbableLineupsResponse:
+      type: object
+      properties:
+        matchId: { type: integer }
+        home: { $ref: "#/components/schemas/ProbableLineup" }
+        away: { $ref: "#/components/schemas/ProbableLineup" }
+        dataSource: { $ref: "#/components/schemas/DataSource" }
+      required: [matchId, home, away]
 
     H2HSummary:
       type: object
@@ -614,6 +811,7 @@ components:
         impliedProb: { type: number }
         edge: { type: number }
         confidence: { type: string, enum: [low, medium, high] }
+        bookmaker: { type: string, nullable: true }
       required: [matchId, matchLabel, kickoff, market, modelProb, marketOdds, impliedProb, edge, confidence]
 
     MorningBriefing:
@@ -649,14 +847,14 @@ components:
           properties:
             playerName: { type: string }
             teamShortName: { type: string }
-            goals: { type: integer }
+            goals: { type: number }
           required: [playerName, teamShortName, goals]
         topAssister:
           type: object
           properties:
             playerName: { type: string }
             teamShortName: { type: string }
-            assists: { type: integer }
+            assists: { type: number }
           required: [playerName, teamShortName, assists]
         leader:
           type: object
@@ -680,4 +878,5 @@ components:
               gameweek: { type: integer }
               accuracyPct: { type: number }
             required: [gameweek, accuracyPct]
+        dataSource: { $ref: "#/components/schemas/DataSource" }
       required: [currentGameweek, liveMatches, todaysMatches, topScorer, topAssister, leader, modelAccuracy, weeklyAccuracy]

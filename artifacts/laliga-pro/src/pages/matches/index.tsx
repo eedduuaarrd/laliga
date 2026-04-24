@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ListMatchesStatus } from "@workspace/api-client-react/src/generated/api.schemas";
+type ListMatchesStatus = "scheduled" | "live" | "finished";
 
 export default function Matches() {
   const [status, setStatus] = useState<ListMatchesStatus | "all">("all");

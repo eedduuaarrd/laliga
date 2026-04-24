@@ -1,7 +1,13 @@
-import { Router, type IRouter } from "express";
-import { MATCHES, type SeedMatch } from "../data/matches.js";
-import { TEAMS, buildCrestUrl } from "../data/teams.js";
-import { buildLineup, buildMatchStats, buildMomentum, buildEvents, getRefereeStats } from "../data/lineups.js";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { getMatchesByStatus, getMatchesByGameweek, getMatchById, type LiveMatch } from "../data/matches.js";
+import {
+  buildLineupFor,
+  getMatchStats,
+  getMatchMomentum,
+  getMatchEvents,
+  refereeStubFromName,
+} from "../data/lineups.js";
+import { type LiveTeam } from "../data/teams.js";
 import {
   ListMatchesResponse,
   GetMatchResponse,
@@ -10,79 +16,84 @@ import {
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
 
-function teamWithCrest(teamId: number) {
-  const team = TEAMS.find((t) => t.id === teamId)!;
+function shapeTeam(t: LiveTeam) {
   return {
-    id: team.id,
-    name: team.name,
-    shortName: team.shortName,
-    city: team.city,
-    founded: team.founded,
-    stadium: team.stadium,
-    primaryColor: team.primaryColor,
-    secondaryColor: team.secondaryColor,
-    crestUrl: buildCrestUrl(team),
-    manager: team.manager,
-    formation: team.formation,
+    id: t.id,
+    name: t.name,
+    shortName: t.shortName,
+    abbreviation: t.abbreviation,
+    city: t.city,
+    founded: t.founded,
+    stadium: t.stadium,
+    primaryColor: t.primaryColor,
+    secondaryColor: t.secondaryColor,
+    crestUrl: t.crestUrl,
+    manager: t.manager,
+    formation: t.formation,
   };
 }
 
-export function matchSummary(m: SeedMatch) {
+export function matchSummary(m: LiveMatch) {
   return {
     id: m.id,
     gameweek: m.gameweek,
     kickoff: m.kickoff,
     status: m.status,
-    minute: m.minute ?? null,
-    homeTeam: teamWithCrest(m.homeTeamId),
-    awayTeam: teamWithCrest(m.awayTeamId),
-    homeScore: m.homeScore ?? null,
-    awayScore: m.awayScore ?? null,
+    statusDetail: m.statusDetail,
+    minute: m.minute,
+    homeTeam: shapeTeam(m.homeTeam),
+    awayTeam: shapeTeam(m.awayTeam),
+    homeScore: m.homeScore,
+    awayScore: m.awayScore,
     venue: m.venue,
     referee: m.referee,
   };
 }
 
-router.get("/matches", (req, res) => {
+router.get("/matches", wrap(async (req, res) => {
   const parsed = ListMatchesQueryParams.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Invalid query" });
   const { status, gameweek } = parsed.data;
-  let filtered = MATCHES;
-  if (status && status !== "all") filtered = filtered.filter((m) => m.status === status);
-  if (gameweek != null) filtered = filtered.filter((m) => m.gameweek === gameweek);
-  filtered = [...filtered].sort((a, b) => a.kickoff.localeCompare(b.kickoff));
-  const data = ListMatchesResponse.parse(filtered.map(matchSummary));
+  let list = gameweek != null
+    ? await getMatchesByGameweek(gameweek)
+    : await getMatchesByStatus(status);
+  if (gameweek != null && status && status !== "all") {
+    list = list.filter((m) => m.status === status);
+  }
+  const data = ListMatchesResponse.parse(list.map(matchSummary));
   return res.json(data);
-});
+}));
 
-router.get("/matches/:id", (req, res) => {
+router.get("/matches/:id", wrap(async (req, res) => {
   const parsed = GetMatchParams.safeParse({ id: Number(req.params.id) });
   if (!parsed.success) return res.status(400).json({ error: "Invalid id" });
-  const m = MATCHES.find((x) => x.id === parsed.data.id);
+  const m = await getMatchById(parsed.data.id);
   if (!m) return res.status(404).json({ error: "Match not found" });
-  const homeLineup = buildLineup(m.homeTeamId);
-  const awayLineup = buildLineup(m.awayTeamId);
-  const homeShort = TEAMS.find((t) => t.id === m.homeTeamId)!.shortName;
-  const awayShort = TEAMS.find((t) => t.id === m.awayTeamId)!.shortName;
+  const [stats, homeLineup, awayLineup, momentum, events] = await Promise.all([
+    getMatchStats(m),
+    buildLineupFor(m, "home"),
+    buildLineupFor(m, "away"),
+    getMatchMomentum(m),
+    getMatchEvents(m),
+  ]);
   const data = GetMatchResponse.parse({
     match: matchSummary(m),
-    stats: buildMatchStats(m),
-    homeLineup: {
-      formation: homeLineup.formation,
-      starting: homeLineup.starting.map((p) => ({ ...p, teamShortName: homeShort })),
-      bench: homeLineup.bench.map((p) => ({ ...p, teamShortName: homeShort })),
+    stats,
+    homeLineup,
+    awayLineup,
+    momentum,
+    events,
+    refereeStats: refereeStubFromName(m.referee),
+    dataSource: {
+      provider: "ESPN",
+      fetchedAt: new Date().toISOString(),
+      cacheTtlSeconds: 30,
     },
-    awayLineup: {
-      formation: awayLineup.formation,
-      starting: awayLineup.starting.map((p) => ({ ...p, teamShortName: awayShort })),
-      bench: awayLineup.bench.map((p) => ({ ...p, teamShortName: awayShort })),
-    },
-    momentum: buildMomentum(m),
-    events: buildEvents(m),
-    refereeStats: getRefereeStats(m.referee),
   });
   return res.json(data);
-});
+}));
 
 export default router;

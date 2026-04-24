@@ -48,8 +48,15 @@ function SidebarContent() {
           );
         })}
       </nav>
-      <div className="p-4 border-t border-sidebar-border text-xs text-sidebar-foreground/50">
-        System Status: <span className="text-primary font-medium">Online</span>
+      <div className="p-4 border-t border-sidebar-border text-xs text-sidebar-foreground/50 space-y-1">
+        <div>System: <span className="text-primary font-medium">Online</span></div>
+        <div className="flex items-center gap-1.5">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+          </span>
+          <span>Live data · ESPN</span>
+        </div>
       </div>
     </div>
   );
@@ -85,8 +92,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Topbar */}
         <header className="h-14 border-b bg-card/50 backdrop-blur sticky top-0 z-10 px-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+            </span>
             <div className="text-sm font-medium">Live Market Data</div>
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border border-primary/40 text-primary bg-primary/5">ESPN public APIs</span>
           </div>
         </header>
         <main className="flex-1 p-4 md:p-6 overflow-x-hidden">

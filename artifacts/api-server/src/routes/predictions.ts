@@ -1,179 +1,174 @@
-import { Router, type IRouter } from "express";
-import { MATCHES } from "../data/matches.js";
-import { TEAMS, buildCrestUrl } from "../data/teams.js";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { getMatchesByStatus, getMatchById } from "../data/matches.js";
+import { getTeamById, type LiveTeam } from "../data/teams.js";
 import {
-  basicPredictionForMatch,
-  getUpcomingPredictions,
-  computeLambdas,
-  poissonPredict,
-  computeAbsenceImpact,
-  computeH2HBias,
-  getMarketOdds,
+  predictMatch,
+  loadFullPrediction,
+  buildPlayerPropsForSide,
+  buildProbableLineup,
+  type MatchPrediction,
 } from "../data/predictions.js";
-import { getTeamForm, getTeamFormScore, getTeamSeed } from "../data/standings.js";
-import { getTeamInjuries } from "../data/injuries.js";
-import { PLAYERS } from "../data/players.js";
 import {
   ListPredictionsResponse,
   GetPredictionResponse,
-  GetPredictionParams,
+  GetPlayerPropsResponse,
+  GetProbableLineupsResponse,
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
 
-function teamWithCrest(teamId: number) {
-  const team = TEAMS.find((t) => t.id === teamId)!;
+function shapeTeam(t: LiveTeam) {
   return {
-    id: team.id,
-    name: team.name,
-    shortName: team.shortName,
-    city: team.city,
-    founded: team.founded,
-    stadium: team.stadium,
-    primaryColor: team.primaryColor,
-    secondaryColor: team.secondaryColor,
-    crestUrl: buildCrestUrl(team),
-    manager: team.manager,
-    formation: team.formation,
+    id: t.id,
+    name: t.name,
+    shortName: t.shortName,
+    abbreviation: t.abbreviation,
+    city: t.city,
+    founded: t.founded,
+    stadium: t.stadium,
+    primaryColor: t.primaryColor,
+    secondaryColor: t.secondaryColor,
+    crestUrl: t.crestUrl,
+    manager: t.manager,
+    formation: t.formation,
   };
 }
 
-function basicToResponse(p: ReturnType<typeof basicPredictionForMatch>) {
+function shapePrediction(p: MatchPrediction, home: LiveTeam, away: LiveTeam) {
   return {
     matchId: p.matchId,
     kickoff: p.kickoff,
-    homeTeam: teamWithCrest(p.homeTeamId),
-    awayTeam: teamWithCrest(p.awayTeamId),
+    homeTeam: shapeTeam(home),
+    awayTeam: shapeTeam(away),
     homeWinProb: p.homeWinProb,
     drawProb: p.drawProb,
     awayWinProb: p.awayWinProb,
     expectedHomeGoals: p.expectedHomeGoals,
     expectedAwayGoals: p.expectedAwayGoals,
+    bttsProb: p.bttsProb,
+    over25Prob: p.over25Prob,
+    under25Prob: p.under25Prob,
+    cleanSheetHome: p.cleanSheetHome,
+    cleanSheetAway: p.cleanSheetAway,
     confidence: p.confidence,
     recommendation: p.recommendation,
+    source: p.source,
+    bookmaker: p.bookmaker,
+    oddsLastUpdate: p.oddsLastUpdate,
   };
 }
 
-router.get("/predictions", (_req, res) => {
-  const data = ListPredictionsResponse.parse(getUpcomingPredictions().map(basicToResponse));
+router.get("/predictions", wrap(async (_req, res) => {
+  const upcoming = await getMatchesByStatus("upcoming");
+  const head = upcoming.slice(0, 12);
+  const out = (await Promise.all(
+    head.map(async (m) => {
+      try {
+        const built = await predictMatch(m);
+        return shapePrediction(built.prediction, m.homeTeam, m.awayTeam);
+      } catch {
+        return null;
+      }
+    }),
+  )).filter((x): x is NonNullable<typeof x> => x != null);
+  const data = ListPredictionsResponse.parse(out);
   res.json(data);
-});
+}));
 
-router.get("/predictions/:matchId", (req, res) => {
-  const parsed = GetPredictionParams.safeParse({ matchId: Number(req.params.matchId) });
-  if (!parsed.success) return res.status(400).json({ error: "Invalid matchId" });
-  const matchId = parsed.data.matchId;
-  const m = MATCHES.find((x) => x.id === matchId);
-  if (!m) return res.status(404).json({ error: "Match not found" });
-
-  const basic = basicPredictionForMatch(m);
-  const { lambdaH, lambdaA } = computeLambdas(m);
-  const result = poissonPredict(lambdaH, lambdaA, 7);
-
-  // Top 5 scorelines
-  const sortedMatrix = [...result.matrix].sort((a, b) => b.probability - a.probability);
-  const topScorelines = sortedMatrix.slice(0, 5).map((s) => ({
-    label: `${s.homeGoals}-${s.awayGoals}`,
-    probability: +s.probability.toFixed(4),
-  }));
-
-  // Score matrix limited to 8x8 (0..7) for the heatmap
-  const scoreMatrix = result.matrix.map((s) => ({
-    homeGoals: s.homeGoals,
-    awayGoals: s.awayGoals,
-    probability: +s.probability.toFixed(5),
-  }));
-
-  // Form factor
-  const homeShort = getTeamSeed(m.homeTeamId).shortName;
-  const awayShort = getTeamSeed(m.awayTeamId).shortName;
-
-  // Absence impact
-  const homeImpact = computeAbsenceImpact(m.homeTeamId);
-  const awayImpact = computeAbsenceImpact(m.awayTeamId);
-  const homeMissing = getTeamInjuries(m.homeTeamId).map((i) => {
-    const p = PLAYERS.find((pl) => pl.id === i.playerId)!;
-    return {
-      id: i.id,
-      playerId: i.playerId,
-      playerName: p.name,
-      teamId: p.teamId,
-      teamShortName: homeShort,
-      type: i.type,
-      description: i.description,
-      severity: i.severity,
-      expectedReturn: i.expectedReturn,
-      impactScore: i.impactScore,
-    };
-  });
-  const awayMissing = getTeamInjuries(m.awayTeamId).map((i) => {
-    const p = PLAYERS.find((pl) => pl.id === i.playerId)!;
-    return {
-      id: i.id,
-      playerId: i.playerId,
-      playerName: p.name,
-      teamId: p.teamId,
-      teamShortName: awayShort,
-      type: i.type,
-      description: i.description,
-      severity: i.severity,
-      expectedReturn: i.expectedReturn,
-      impactScore: i.impactScore,
-    };
-  });
-
-  // H2H summary with recent meetings
-  const h2hBias = computeH2HBias(m.homeTeamId, m.awayTeamId);
-  const homeName = getTeamSeed(m.homeTeamId).name;
-  const awayName = getTeamSeed(m.awayTeamId).name;
-  const recentMeetings = MATCHES
-    .filter((x) => x.status === "finished" && (
-      (x.homeTeamId === m.homeTeamId && x.awayTeamId === m.awayTeamId) ||
-      (x.homeTeamId === m.awayTeamId && x.awayTeamId === m.homeTeamId)
-    ))
-    .slice(0, 5)
-    .map((x) => ({
-      date: x.kickoff.split("T")[0]!,
-      competition: "La Liga",
-      homeTeam: getTeamSeed(x.homeTeamId).name,
-      awayTeam: getTeamSeed(x.awayTeamId).name,
-      homeScore: x.homeScore ?? 0,
-      awayScore: x.awayScore ?? 0,
-    }));
-
-  // Market odds + value
-  const odds = getMarketOdds(basic);
-
+router.get("/predictions/:matchId", wrap(async (req, res) => {
+  const matchId = Number(req.params.matchId);
+  if (!Number.isFinite(matchId)) return res.status(400).json({ error: "Invalid matchId" });
+  const full = await loadFullPrediction(matchId);
+  if (!full) return res.status(404).json({ error: "Match not found" });
+  const m = full.match;
   const data = GetPredictionResponse.parse({
-    base: basicToResponse(basic),
-    scoreMatrix,
-    topScorelines,
+    base: shapePrediction(full.prediction, m.homeTeam, m.awayTeam),
+    scoreMatrix: full.poisson.matrix,
+    topScorelines: full.props.exactScore,
     formFactor: {
-      homeFormScore: getTeamFormScore(m.homeTeamId),
-      awayFormScore: getTeamFormScore(m.awayTeamId),
-      homeLast5: getTeamForm(m.homeTeamId),
-      awayLast5: getTeamForm(m.awayTeamId),
+      homeFormScore: full.form.home.score,
+      awayFormScore: full.form.away.score,
+      homeLast5: full.form.home.last5,
+      awayLast5: full.form.away.last5,
     },
     h2h: {
       homeTeamId: m.homeTeamId,
       awayTeamId: m.awayTeamId,
-      totalMatches: h2hBias.total,
-      homeWins: h2hBias.homeWins,
-      draws: h2hBias.draws,
-      awayWins: h2hBias.awayWins,
-      avgGoals: h2hBias.avgGoals,
-      recentMeetings,
+      totalMatches: full.h2h.total,
+      homeWins: full.h2h.homeWins,
+      draws: full.h2h.draws,
+      awayWins: full.h2h.awayWins,
+      avgGoals: full.h2h.avgGoals,
+      recentMeetings: full.h2h.matches.slice(0, 5).map((mh) => ({
+        date: mh.kickoff.split("T")[0]!,
+        competition: "La Liga",
+        homeTeam: mh.homeTeam.name,
+        awayTeam: mh.awayTeam.name,
+        homeScore: mh.homeScore ?? 0,
+        awayScore: mh.awayScore ?? 0,
+      })),
     },
     absenceImpact: {
-      homeImpact,
-      awayImpact,
-      homeMissing,
-      awayMissing,
+      homeImpact: full.missing.home.reduce((s, i) => s + i.impactScore, 0),
+      awayImpact: full.missing.away.reduce((s, i) => s + i.impactScore, 0),
+      homeMissing: full.missing.home,
+      awayMissing: full.missing.away,
     },
-    marketOdds: odds,
+    marketOdds: full.market,
+    props: full.props,
+    playerProps: {
+      matchId,
+      home: full.playerProps.home,
+      away: full.playerProps.away,
+      dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 60 },
+    },
+    probableLineups: {
+      matchId,
+      home: full.probableLineup.home,
+      away: full.probableLineup.away,
+      dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 600 },
+    },
+    dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 60 },
   });
-  void homeName; void awayName;
   return res.json(data);
-});
+}));
+
+router.get("/predictions/:matchId/players", wrap(async (req, res) => {
+  const matchId = Number(req.params.matchId);
+  if (!Number.isFinite(matchId)) return res.status(400).json({ error: "Invalid matchId" });
+  const m = await getMatchById(matchId);
+  if (!m) return res.status(404).json({ error: "Match not found" });
+  const built = await predictMatch(m);
+  const home = await buildPlayerPropsForSide(m, "home", built.poisson.expectedHome, built.summary);
+  const away = await buildPlayerPropsForSide(m, "away", built.poisson.expectedAway, built.summary);
+  const data = GetPlayerPropsResponse.parse({
+    matchId,
+    home,
+    away,
+    dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 60 },
+  });
+  return res.json(data);
+}));
+
+router.get("/predictions/:matchId/lineups", wrap(async (req, res) => {
+  const matchId = Number(req.params.matchId);
+  if (!Number.isFinite(matchId)) return res.status(400).json({ error: "Invalid matchId" });
+  const m = await getMatchById(matchId);
+  if (!m) return res.status(404).json({ error: "Match not found" });
+  const [home, away] = await Promise.all([
+    buildProbableLineup(m, "home"),
+    buildProbableLineup(m, "away"),
+  ]);
+  void getTeamById; // keep import lazy-safe
+  const data = GetProbableLineupsResponse.parse({
+    matchId,
+    home,
+    away,
+    dataSource: { provider: "ESPN", fetchedAt: new Date().toISOString(), cacheTtlSeconds: 600 },
+  });
+  return res.json(data);
+}));
 
 export default router;

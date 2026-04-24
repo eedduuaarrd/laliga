@@ -1,198 +1,163 @@
-import { TEAMS } from "./teams.js";
-import { getTeamSeed } from "./standings.js";
+import {
+  getScoreboardRange,
+  getEventSummary,
+  type RawScoreboardEvent,
+  type RawCompetitor,
+} from "../lib/espn.js";
+import { teamFromRaw, type LiveTeam } from "./teams.js";
 
-export interface SeedMatch {
+export interface LiveMatch {
   id: number;
   gameweek: number;
   kickoff: string; // ISO
   status: "live" | "upcoming" | "finished";
-  minute?: number;
+  statusDetail: string;
+  minute: number | null;
   homeTeamId: number;
   awayTeamId: number;
-  homeScore?: number;
-  awayScore?: number;
+  homeTeam: LiveTeam;
+  awayTeam: LiveTeam;
+  homeScore: number | null;
+  awayScore: number | null;
   venue: string;
   referee: string;
 }
 
-const REFEREES = [
-  "Jesús Gil Manzano",
-  "José Luis Munuera Montero",
-  "César Soto Grado",
-  "Mateo Busquets Ferrer",
-  "Ricardo de Burgos Bengoetxea",
-  "Juan Martínez Munuera",
-  "Guillermo Cuadra Fernández",
-  "Pablo González Fuertes",
-  "Alejandro Hernández Hernández",
-  "Javier Alberola Rojas",
-];
-
-// Build a deterministic schedule. We have 12 finished matchdays, 1 live matchday, and several upcoming.
-// Today is April 24, 2026. Use a current-feeling timeline.
-const TODAY = new Date("2026-04-24T12:00:00Z");
-
-function isoOffset(daysFromToday: number, hour: number, minute = 0): string {
-  const d = new Date(TODAY);
-  d.setUTCDate(d.getUTCDate() + daysFromToday);
-  d.setUTCHours(hour, minute, 0, 0);
-  return d.toISOString();
+function inferStatus(ev: RawScoreboardEvent): { status: "live" | "upcoming" | "finished"; minute: number | null; detail: string } {
+  const t = ev.status?.type ?? ev.competitions?.[0]?.status?.type;
+  const detail = t?.shortDetail ?? t?.description ?? "";
+  if (!t) return { status: "upcoming", minute: null, detail };
+  if (t.completed) return { status: "finished", minute: 90, detail };
+  if (t.state === "in") {
+    const minute = ev.status?.period ? Math.max(1, Math.round((ev.status?.clock ?? 0) / 60)) : null;
+    return { status: "live", minute, detail };
+  }
+  return { status: "upcoming", minute: null, detail };
 }
 
-function r(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0xffffffff;
+function pick(c: RawCompetitor[] | undefined, side: "home" | "away"): RawCompetitor | undefined {
+  return (c ?? []).find((x) => x.homeAway === side);
+}
+
+function eventToMatch(ev: RawScoreboardEvent): LiveMatch | null {
+  const comp = ev.competitions?.[0];
+  if (!comp) return null;
+  const home = pick(comp.competitors, "home");
+  const away = pick(comp.competitors, "away");
+  if (!home || !away) return null;
+  const { status, minute, detail } = inferStatus(ev);
+  return {
+    id: Number(ev.id),
+    gameweek: ev.week?.number ?? 0,
+    kickoff: ev.date,
+    status,
+    statusDetail: detail,
+    minute,
+    homeTeamId: Number(home.team.id),
+    awayTeamId: Number(away.team.id),
+    homeTeam: teamFromRaw(home.team),
+    awayTeam: teamFromRaw(away.team),
+    homeScore: home.score != null ? Number(home.score) : null,
+    awayScore: away.score != null ? Number(away.score) : null,
+    venue: comp.venue?.fullName ?? "",
+    referee: "", // referees come from summary endpoint, not scoreboard
   };
 }
 
-interface Pairing { home: number; away: number; }
-
-// Curated finished gameweek pairings (12 played) — keep balanced so each team plays each gameweek once.
-// We use a circle method to produce a 12-round schedule; team[0..19].
-function generateRoundRobin(): Pairing[][] {
-  const ids = TEAMS.map((t) => t.id);
-  const n = ids.length; // 20
-  const rotating = ids.slice(1);
-  const rounds: Pairing[][] = [];
-  for (let round = 0; round < n - 1; round++) {
-    const round_pairs: Pairing[] = [];
-    const arr = [ids[0]!, ...rotating];
-    for (let i = 0; i < n / 2; i++) {
-      const home = arr[i]!;
-      const away = arr[n - 1 - i]!;
-      // alternate venue
-      if ((round + i) % 2 === 0) round_pairs.push({ home, away });
-      else round_pairs.push({ home: away, away: home });
-    }
-    rounds.push(round_pairs);
-    // rotate
-    rotating.unshift(rotating.pop()!);
-  }
-  return rounds;
+function daysBack(from: Date, days: number): Date {
+  const d = new Date(from);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d;
+}
+function daysAhead(from: Date, days: number): Date {
+  const d = new Date(from);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
 }
 
-function determineScore(homeId: number, awayId: number, seed: number): { home: number; away: number } {
-  const h = getTeamSeed(homeId);
-  const a = getTeamSeed(awayId);
-  const rng = r(seed);
-  const lambdaH = h.attackStrength * (1.4 / a.defenseStrength) * h.homeAdvantage;
-  const lambdaA = a.attackStrength * (1.2 / h.defenseStrength);
-  // poisson sampler via inverse transform
-  const samplePoisson = (lambda: number) => {
-    const L = Math.exp(-lambda);
-    let k = 0;
-    let p = 1;
-    do {
-      k++;
-      p *= rng();
-    } while (p > L);
-    return k - 1;
-  };
-  return { home: Math.min(samplePoisson(lambdaH), 6), away: Math.min(samplePoisson(lambdaA), 6) };
-}
+// Default rolling window: last 14 days through next 30 days. La Liga matchdays
+// repeat weekly, so this almost always covers the next 4–5 fixtures plus the
+// last full matchday.
+const PAST_DAYS = 14;
+const FUTURE_DAYS = 30;
 
-const ROUNDS = generateRoundRobin();
-
-export const MATCHES: SeedMatch[] = (() => {
-  const out: SeedMatch[] = [];
-  let id = 1;
-  // Finished: gameweeks 1..12 (~12 weeks ago to ~3 days ago)
-  for (let gw = 1; gw <= 12; gw++) {
-    const round = ROUNDS[(gw - 1) % ROUNDS.length]!;
-    const daysAgo = (12 - gw) * 7 + 3;
-    round.forEach((p, idx) => {
-      const score = determineScore(p.home, p.away, gw * 1000 + idx + 17);
-      out.push({
-        id: id++,
-        gameweek: gw,
-        kickoff: isoOffset(-daysAgo, 19 + (idx % 3), idx % 2 === 0 ? 0 : 30),
-        status: "finished",
-        homeTeamId: p.home,
-        awayTeamId: p.away,
-        homeScore: score.home,
-        awayScore: score.away,
-        venue: getTeamSeed(p.home).stadium,
-        referee: REFEREES[(gw + idx) % REFEREES.length]!,
-      });
-    });
+export async function getAllMatches(now: Date = new Date()): Promise<LiveMatch[]> {
+  const range = await getScoreboardRange(daysBack(now, PAST_DAYS), daysAhead(now, FUTURE_DAYS));
+  const out: LiveMatch[] = [];
+  for (const ev of range.events ?? []) {
+    const m = eventToMatch(ev);
+    if (m) out.push(m);
   }
-
-  // Live: gameweek 13 — 5 matches today, 2 of them in progress
-  const round13 = ROUNDS[12 % ROUNDS.length]!;
-  round13.forEach((p, idx) => {
-    let status: SeedMatch["status"] = "upcoming";
-    let kickoff = isoOffset(0, 18 + (idx % 4), idx % 2 === 0 ? 0 : 30);
-    let minute: number | undefined;
-    let homeScore: number | undefined;
-    let awayScore: number | undefined;
-    if (idx === 0) {
-      // first match: live, 67th minute
-      status = "live";
-      kickoff = isoOffset(0, 11, 0);
-      minute = 67;
-      const sc = determineScore(p.home, p.away, 13000 + idx + 99);
-      homeScore = sc.home;
-      awayScore = sc.away;
-    } else if (idx === 1) {
-      // second match: live, 32nd minute
-      status = "live";
-      kickoff = isoOffset(0, 11, 30);
-      minute = 32;
-      const sc = determineScore(p.home, p.away, 13100 + idx + 11);
-      homeScore = Math.max(0, sc.home - 1);
-      awayScore = Math.max(0, sc.away - 1);
-    } else if (idx <= 4) {
-      // upcoming today
-      kickoff = isoOffset(0, 16 + idx * 2, 0);
-    }
-    out.push({
-      id: id++,
-      gameweek: 13,
-      kickoff,
-      status,
-      minute,
-      homeTeamId: p.home,
-      awayTeamId: p.away,
-      homeScore,
-      awayScore,
-      venue: getTeamSeed(p.home).stadium,
-      referee: REFEREES[(13 + idx) % REFEREES.length]!,
-    });
-  });
-
-  // Upcoming gameweeks 14..16
-  for (let gw = 14; gw <= 16; gw++) {
-    const round = ROUNDS[(gw - 1) % ROUNDS.length]!;
-    const daysFromNow = (gw - 13) * 7;
-    round.forEach((p, idx) => {
-      out.push({
-        id: id++,
-        gameweek: gw,
-        kickoff: isoOffset(daysFromNow + Math.floor(idx / 4), 18 + (idx % 4), idx % 2 === 0 ? 0 : 30),
-        status: "upcoming",
-        homeTeamId: p.home,
-        awayTeamId: p.away,
-        venue: getTeamSeed(p.home).stadium,
-        referee: REFEREES[(gw + idx) % REFEREES.length]!,
-      });
-    });
-  }
+  out.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
   return out;
-})();
-
-export function getCurrentGameweek(): number {
-  return 13;
 }
 
-export function getMatchById(id: number): SeedMatch | undefined {
-  return MATCHES.find((m) => m.id === id);
+export async function getMatchesByStatus(status?: "live" | "upcoming" | "finished" | "all"): Promise<LiveMatch[]> {
+  const all = await getAllMatches();
+  if (!status || status === "all") return all;
+  return all.filter((m) => m.status === status);
 }
 
-export function getH2HMatches(homeTeamId: number, awayTeamId: number): SeedMatch[] {
-  return MATCHES.filter((m) => m.status === "finished" && (
-    (m.homeTeamId === homeTeamId && m.awayTeamId === awayTeamId) ||
-    (m.homeTeamId === awayTeamId && m.awayTeamId === homeTeamId)
-  ));
+export async function getMatchesByGameweek(gw: number): Promise<LiveMatch[]> {
+  const all = await getAllMatches();
+  return all.filter((m) => m.gameweek === gw);
+}
+
+export async function getMatchById(id: number): Promise<LiveMatch | undefined> {
+  // Try the rolling window first
+  const all = await getAllMatches();
+  let m = all.find((x) => x.id === id);
+  if (m) return m;
+  // Fall back to the summary endpoint and synthesise enough to match.
+  try {
+    const sum = await getEventSummary(id);
+    const comp = sum.header?.competitions?.[0];
+    if (!comp) return undefined;
+    const home = pick(comp.competitors, "home");
+    const away = pick(comp.competitors, "away");
+    if (!home || !away) return undefined;
+    const stType = comp.status?.type;
+    const status: "live" | "upcoming" | "finished" =
+      stType?.completed ? "finished" : stType?.state === "in" ? "live" : "upcoming";
+    return {
+      id,
+      gameweek: 0,
+      kickoff: comp.date,
+      status,
+      statusDetail: stType?.shortDetail ?? "",
+      minute: stType?.state === "in" ? null : null,
+      homeTeamId: Number(home.team.id),
+      awayTeamId: Number(away.team.id),
+      homeTeam: teamFromRaw(home.team),
+      awayTeam: teamFromRaw(away.team),
+      homeScore: home.score != null ? Number(home.score) : null,
+      awayScore: away.score != null ? Number(away.score) : null,
+      venue: comp.venue?.fullName ?? "",
+      referee: sum.gameInfo?.officials?.find((o) => o.position?.name?.toLowerCase().includes("center"))?.fullName ?? "",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function getH2HMatches(homeTeamId: number, awayTeamId: number): Promise<LiveMatch[]> {
+  // ESPN's scoreboard window is small. Use the summary endpoint of the next
+  // scheduled meeting (if any); the summary has `headToHeadGames` going back years.
+  const window = await getAllMatches();
+  return window.filter(
+    (m) =>
+      m.status === "finished" &&
+      ((m.homeTeamId === homeTeamId && m.awayTeamId === awayTeamId) ||
+       (m.homeTeamId === awayTeamId && m.awayTeamId === homeTeamId)),
+  );
+}
+
+export async function getCurrentGameweek(): Promise<number> {
+  const all = await getAllMatches();
+  // Choose the gameweek that has the most live or "today" matches; otherwise the next upcoming.
+  const now = Date.now();
+  const today = all.filter((m) => Math.abs(new Date(m.kickoff).getTime() - now) < 24 * 3600 * 1000);
+  if (today.length) return today[0]!.gameweek || 1;
+  const next = all.find((m) => m.status === "upcoming");
+  return next?.gameweek ?? 1;
 }
