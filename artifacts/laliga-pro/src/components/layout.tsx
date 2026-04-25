@@ -1,110 +1,56 @@
-import { Link, useLocation } from "wouter";
-import { 
-  LayoutDashboard, 
-  Swords, 
-  BrainCircuit, 
-  Trophy, 
-  ShieldHalf, 
-  Users, 
-  TrendingUp, 
-  Activity, 
-  Newspaper,
-  Menu
-} from "lucide-react";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Button } from "@/components/ui/button";
+import { Activity } from "lucide-react";
 
-const NAV_ITEMS = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/briefing", label: "Morning Briefing", icon: Newspaper },
-  { href: "/matches", label: "Matches", icon: Swords },
-  { href: "/predictions", label: "Predictions", icon: BrainCircuit },
-  { href: "/value-bets", label: "Value Bets", icon: TrendingUp },
-  { href: "/standings", label: "Standings", icon: Trophy },
-  { href: "/teams", label: "Teams", icon: ShieldHalf },
-  { href: "/players", label: "Players", icon: Users },
-  { href: "/injuries", label: "Injuries", icon: Activity },
-];
-
-function SidebarContent() {
-  const [location] = useLocation();
-
-  return (
-    <div className="flex flex-col h-full bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
-      <div className="p-4 border-b border-sidebar-border flex items-center gap-2">
-        <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-primary-foreground font-bold">LL</div>
-        <span className="font-bold text-lg tracking-tight">Pro Analytics</span>
-      </div>
-      <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
-        {NAV_ITEMS.map((item) => {
-          const isActive = location === item.href || (item.href !== "/" && location.startsWith(item.href));
-          return (
-            <Link key={item.href} href={item.href}>
-              <div className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors cursor-pointer ${isActive ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium" : "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"}`}>
-                <item.icon className="w-5 h-5" />
-                <span>{item.label}</span>
-              </div>
-            </Link>
-          );
-        })}
-      </nav>
-      <div className="p-4 border-t border-sidebar-border text-xs text-sidebar-foreground/50 space-y-1">
-        <div>System: <span className="text-primary font-medium">Online</span></div>
-        <div className="flex items-center gap-1.5">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
-          </span>
-          <span>Live data · ESPN</span>
-        </div>
-      </div>
-    </div>
-  );
+interface LayoutProps {
+  children: React.ReactNode;
+  source?: string | null;
+  realBet365?: boolean;
 }
 
-export function Layout({ children }: { children: React.ReactNode }) {
+export function Layout({ children, source, realBet365 }: LayoutProps) {
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row">
-      {/* Mobile Header */}
-      <div className="md:hidden flex items-center justify-between p-4 border-b bg-card">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 bg-primary rounded flex items-center justify-center text-primary-foreground font-bold text-xs">LL</div>
-          <span className="font-bold">Pro Analytics</span>
-        </div>
-        <Sheet>
-          <SheetTrigger asChild>
-            <Button variant="ghost" size="icon">
-              <Menu className="w-5 h-5" />
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="left" className="p-0 w-64 border-r-sidebar-border">
-            <SidebarContent />
-          </SheetContent>
-        </Sheet>
-      </div>
-
-      {/* Desktop Sidebar */}
-      <div className="hidden md:block w-64 h-screen sticky top-0 shrink-0">
-        <SidebarContent />
-      </div>
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Topbar */}
-        <header className="h-14 border-b bg-card/50 backdrop-blur sticky top-0 z-10 px-4 flex items-center justify-between">
+    <div className="min-h-screen bg-background text-foreground flex flex-col">
+      <header className="sticky top-0 z-20 border-b border-border/60 bg-background/85 backdrop-blur-md">
+        <div className="max-w-[1400px] mx-auto px-4 md:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
-            </span>
-            <div className="text-sm font-medium">Live Market Data</div>
-            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border border-primary/40 text-primary bg-primary/5">ESPN public APIs</span>
+            <div className="w-9 h-9 rounded-md bg-primary text-primary-foreground font-black text-sm grid place-items-center tracking-tight shadow-sm">
+              B65
+            </div>
+            <div className="leading-tight">
+              <div className="text-[15px] font-semibold tracking-tight">Bet365 · La Liga Edge</div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                Quotes en directe · model probabilístic
+              </div>
+            </div>
           </div>
-        </header>
-        <main className="flex-1 p-4 md:p-6 overflow-x-hidden">
-          {children}
-        </main>
-      </div>
+          <div className="hidden md:flex items-center gap-3">
+            <span className="pulse-dot" />
+            <span className="text-xs text-muted-foreground font-mono">
+              {source ?? "Carregant…"}
+            </span>
+            {realBet365 != null && (
+              <span
+                className={
+                  "text-[10px] uppercase tracking-[0.18em] px-2 py-1 rounded border " +
+                  (realBet365
+                    ? "border-accent/40 text-accent bg-accent/5"
+                    : "border-primary/40 text-primary bg-primary/5")
+                }
+              >
+                {realBet365 ? "Live bet365" : "Mode model"}
+              </span>
+            )}
+          </div>
+          <div className="md:hidden flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+          </div>
+        </div>
+      </header>
+      <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 md:px-8 py-6 md:py-10">
+        {children}
+      </main>
+      <footer className="border-t border-border/60 mt-12 py-6 text-center text-[11px] text-muted-foreground tracking-wide">
+        Eines per analitzar quotes · No és consell financer · Aposta amb responsabilitat
+      </footer>
     </div>
   );
 }

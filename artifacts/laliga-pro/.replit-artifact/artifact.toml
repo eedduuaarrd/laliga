@@ -1,6 +1,6 @@
 kind = "web"
 previewPath = "/"
-title = "La Liga Pro Analytics"
+title = "Bet365 · La Liga Edge"
 version = "1.0.0"
 id = "artifacts/laliga-pro"
 router = "path"

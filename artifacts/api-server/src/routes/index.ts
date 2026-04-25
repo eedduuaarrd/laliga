@@ -10,6 +10,7 @@ import h2hRouter from "./h2h.js";
 import valueBetsRouter from "./value-bets.js";
 import briefingRouter from "./briefing.js";
 import dashboardRouter from "./dashboard.js";
+import bet365Router from "./bet365.js";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use(h2hRouter);
 router.use(valueBetsRouter);
 router.use(briefingRouter);
 router.use(dashboardRouter);
+router.use(bet365Router);
 
 export default router;
