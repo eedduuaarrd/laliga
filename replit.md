@@ -26,15 +26,16 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
-## La Liga Edge (v0.3.1 — April 2026, keyless)
+## La Liga Edge (v0.4.0 — April 2026, keyless, full market depth)
 
 A focused, single-page La Liga betting board with REAL bookmaker odds + a probabilistic model. The whole UI is in Catalan with a matte-black aesthetic and a single amber/gold accent. **Zero API keys required.**
 
 ### What it does (single page)
 
-1. Lists every La Liga match in the next 10 days (plus anything live now), each with **real DraftKings odds** for 1X2 and Over/Under 2.5 (pulled keyless from ESPN's public `pickcenter` feed) plus model-derived odds for the remaining markets (Over/Under 1.5/3.5, BTTS Yes/No). Each market is tagged `live` or `model` individually.
-2. Suggests **simple bets**, ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with model probability ≥ 40%; live DraftKings selections are preferred within the same risk tier.
-3. Suggests **combined bets** (2/3/4 legs) built from the strongest pick *per match* (so legs are independent), sorted by joint probability.
+1. Lists every La Liga match in the next 10 days (plus anything live now). Each match exposes **~56 markets** in 15 groups + per-player markets (anytime scorer / 2+ goals / anytime assist / G+A) for the top 4 contributors per side (filtered to a goal-contribution probability ≥ 6%).
+2. **Real DraftKings odds** (live/upcoming, pulled keyless from ESPN's public `pickcenter` feed) cover 1X2 and Over/Under 2.5; everything else is **model-derived** (Poisson-based) and clearly labelled. Market groups: 1X2, Doble oportunitat (1X / 12 / X2), Gols (O/U 0.5/1.5/2.5/3.5/4.5), BTTS, Resultat al descans (HT 1X2), Gol a cada part, Porteria a zero, Guanyar sense encaixar, Resultat exacte (top 5), Còrners (O/U 8.5/9.5/10.5), Targetes (O/U 3.5/4.5/5.5), Fores de joc (O/U 3.5/4.5), Faltes (O/U 22.5/25.5), Targeta vermella (Sí/No), Penal al partit (Sí/No), Golejadors, Assistents, Gol+Assistència.
+3. Suggests **simple bets** (top 40), ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with model probability ≥ 40% and odds ≥ 1.18 (no trivial Over 0.5 picks). Live DraftKings selections are preferred within the same risk tier. Per-player markets contribute one selection per player (the highest-EV one).
+4. Suggests **combined bets** (2/3/4 legs) built from the strongest pick *per match* (so legs are independent), sorted by joint probability.
 
 ### Artifacts
 
@@ -44,7 +45,7 @@ A focused, single-page La Liga betting board with REAL bookmaker odds + a probab
 ### Real-odds layer (keyless)
 
 - `artifacts/api-server/src/lib/draftkings-odds.ts` — pulls `pickcenter` for any La Liga match via the existing TTL-cached `getEventSummary` helper, picks the DraftKings provider, converts American moneylines (home / draw / away) and Over/Under 2.5 into decimal odds. Returns `null` when ESPN has not yet published a market (typically matches > 4-5 days away).
-- `artifacts/api-server/src/data/bet365.ts` — builds the board (one entry per match × 11 markets), tags each market `live` (real DraftKings price) or `model` (Poisson + 5% overround), computes `modelProb` / `impliedProb` / `edge`, and produces simple/combined bet suggestions sorted by risk tier.
+- `artifacts/api-server/src/data/bet365.ts` — builds the board (one `BoardMatch` entry per fixture, with ~56 `markets` rows + a `playerMarkets` array of `BoardPlayerMarket`), tags each market `live` or `model` (Poisson + 5% overround), computes `modelProb` / `impliedProb` / `edge`, and produces simple/combined bet suggestions sorted by risk tier. Local Poisson PMF helpers compute corners/cards/offsides/fouls/HT lines from team xG; player markets reuse `buildPlayerPropsForSide` from `predictions.ts` (ESPN season leaders × team xG share). La Liga static priors used for red card (~13%) and penalty (~27%) markets — model-tagged.
 - `artifacts/api-server/src/routes/bet365.ts` — `GET /api/bet365/board` and `GET /api/bet365/suggestions`. Both responses include `liveMatchCount`, `liveMarketCount`, and `totalMatchCount` so the UI can show whether quotes are real DraftKings, fully model, or a mix.
 
 > File names still say `bet365` for compatibility but the product is now branded **"La Liga Edge"** because the only freely accessible real bookmaker for La Liga without a paid API key is DraftKings (via ESPN). Honest labelling: every real quote is tagged DraftKings; every model quote is tagged MODEL.

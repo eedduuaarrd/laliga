@@ -29,6 +29,18 @@ interface Market {
   edge: number | null;
   source: MarketSource;
 }
+interface PlayerMarket {
+  playerId: number;
+  playerName: string;
+  team: "home" | "away";
+  teamShort: string;
+  position: string;
+  positionLabel: string;
+  headshot: string | null;
+  seasonGoals: number;
+  seasonAssists: number;
+  markets: Market[];
+}
 interface BoardMatch {
   matchId: number;
   status: "live" | "upcoming";
@@ -47,6 +59,7 @@ interface BoardMatch {
   oddsLastUpdate: string | null;
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
   markets: Market[];
+  playerMarkets: PlayerMarket[];
 }
 interface BoardResponse {
   source: string;
@@ -259,11 +272,11 @@ export default function Board() {
           </div>
         ) : board.isError ? (
           <ErrorBlock />
-        ) : data!.matches.length === 0 ? (
+        ) : !data || data.matches.length === 0 ? (
           <EmptyBlock label="No hi ha partits en directe ni propers a la finestra de 10 dies." />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {data!.matches.map((m) => (
+            {data.matches.map((m) => (
               <MatchCard key={m.matchId} match={m} />
             ))}
           </div>
@@ -285,7 +298,7 @@ export default function Board() {
           </div>
         ) : suggestions.isError ? (
           <ErrorBlock />
-        ) : sg!.simples.length === 0 ? (
+        ) : !sg || sg.simples.length === 0 ? (
           <EmptyBlock label="No hem trobat apostes simples amb prou confiança ara mateix." />
         ) : (
           <div className="matte-card rounded-xl overflow-hidden">
@@ -298,7 +311,7 @@ export default function Board() {
               <div className="col-span-1 text-center">Edge</div>
               <div className="col-span-2 text-right">Risc</div>
             </div>
-            {sg!.simples.map((b, i) => (
+            {sg.simples.map((b, i) => (
               <SimpleBetRow key={b.id} bet={b} index={i + 1} />
             ))}
           </div>
@@ -320,11 +333,11 @@ export default function Board() {
           </div>
         ) : suggestions.isError ? (
           <ErrorBlock />
-        ) : sg!.combos.length === 0 ? (
+        ) : !sg || sg.combos.length === 0 ? (
           <EmptyBlock label="Cal almenys 2 partits amb seleccions de confiança per construir combinades." />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {sg!.combos.map((c) => (
+            {sg.combos.map((c) => (
               <ComboCard key={c.id} combo={c} />
             ))}
           </div>
@@ -380,12 +393,73 @@ function SectionHeader({
   );
 }
 
-function MatchCard({ match }: { match: BoardMatch }) {
+// Visible by default. Everything else is hidden inside collapsibles to keep
+// the card scannable.
+const PRIMARY_GROUPS = new Set([
+  "1X2",
+  "Doble oportunitat",
+  "Gols",
+  "BTTS (Ambdós marquen)",
+]);
+
+// Order shown for advanced match markets when expanded.
+const ADVANCED_GROUP_ORDER = [
+  "Resultat al descans",
+  "Gol a cada part",
+  "Porteria a zero",
+  "Guanyar sense encaixar",
+  "Resultat exacte",
+  "Còrners",
+  "Targetes",
+  "Fores de joc",
+  "Faltes",
+  "Targeta vermella",
+  "Penal al partit",
+];
+
+function groupMarkets(list: Market[]): Record<string, Market[]> {
   const grouped: Record<string, Market[]> = {};
-  for (const mk of match.markets) {
+  for (const mk of list) {
     if (!grouped[mk.group]) grouped[mk.group] = [];
     grouped[mk.group]!.push(mk);
   }
+  return grouped;
+}
+
+function MarketGroup({ title, list }: { title: string; list: Market[] }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-1.5 px-1">
+        {title}
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {list.map((mk) => (
+          <MarketChip key={mk.key} market={mk} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MatchCard({ match }: { match: BoardMatch }) {
+  const grouped = groupMarkets(match.markets);
+  const primaryGroups: string[] = [];
+  const advancedGroups: string[] = [];
+  for (const g of Object.keys(grouped)) {
+    (PRIMARY_GROUPS.has(g) ? primaryGroups : advancedGroups).push(g);
+  }
+  // Stable order
+  primaryGroups.sort((a, b) => {
+    const order = ["1X2", "Doble oportunitat", "Gols", "BTTS (Ambdós marquen)"];
+    return order.indexOf(a) - order.indexOf(b);
+  });
+  advancedGroups.sort((a, b) => ADVANCED_GROUP_ORDER.indexOf(a) - ADVANCED_GROUP_ORDER.indexOf(b));
+
+  const advancedMarketCount = advancedGroups.reduce((s, g) => s + (grouped[g]?.length ?? 0), 0);
+  const homePlayers = match.playerMarkets.filter((p) => p.team === "home");
+  const awayPlayers = match.playerMarkets.filter((p) => p.team === "away");
+  const playerMarketCount = match.playerMarkets.reduce((s, p) => s + p.markets.length, 0);
+
   return (
     <div className="matte-card matte-card-hover rounded-xl overflow-hidden">
       {/* HEADER */}
@@ -458,27 +532,102 @@ function MatchCard({ match }: { match: BoardMatch }) {
         </div>
       )}
 
-      {/* MARKETS */}
+      {/* PRIMARY MARKETS (always visible) */}
       <div className="p-3 space-y-3">
-        {Object.entries(grouped).map(([group, list]) => (
-          <div key={group}>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-1.5 px-1">
-              {group}
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-              {list.map((mk) => (
-                <MarketChip key={mk.key} market={mk} />
-              ))}
-            </div>
-          </div>
+        {primaryGroups.map((g) => (
+          <MarketGroup key={g} title={g} list={grouped[g]!} />
         ))}
       </div>
+
+      {/* ADVANCED MARKETS (collapsible) */}
+      {advancedMarketCount > 0 && (
+        <details className="group border-t border-border/50">
+          <summary className="cursor-pointer select-none list-none px-4 py-2.5 flex items-center justify-between text-[11px] uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground transition-colors">
+            <span className="flex items-center gap-2">
+              <Layers className="w-3.5 h-3.5" /> Mercats avançats · {advancedMarketCount}
+            </span>
+            <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
+          </summary>
+          <div className="p-3 pt-1 space-y-3">
+            {advancedGroups.map((g) => (
+              <MarketGroup key={g} title={g} list={grouped[g]!} />
+            ))}
+          </div>
+        </details>
+      )}
+
+      {/* PLAYER MARKETS (collapsible) */}
+      {playerMarketCount > 0 && (
+        <details className="group border-t border-border/50">
+          <summary className="cursor-pointer select-none list-none px-4 py-2.5 flex items-center justify-between text-[11px] uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground transition-colors">
+            <span className="flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5" /> Apostes de jugadors · {playerMarketCount}
+            </span>
+            <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
+          </summary>
+          <div className="p-3 pt-1 space-y-3">
+            {homePlayers.length > 0 && <PlayerSection title={match.homeShort} crest={match.homeCrest} players={homePlayers} />}
+            {awayPlayers.length > 0 && <PlayerSection title={match.awayShort} crest={match.awayCrest} players={awayPlayers} />}
+          </div>
+        </details>
+      )}
 
       {match.oddsLastUpdate && (
         <div className="px-4 py-2 border-t border-border/40 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           Actualitzat {relTime(match.oddsLastUpdate)}
         </div>
       )}
+    </div>
+  );
+}
+
+function PlayerSection({
+  title,
+  crest,
+  players,
+}: {
+  title: string;
+  crest: string;
+  players: PlayerMarket[];
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1.5 px-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        {crest ? <img src={crest} alt="" className="w-3.5 h-3.5 object-contain" /> : null}
+        {title}
+      </div>
+      <div className="space-y-2">
+        {players.map((p) => (
+          <PlayerRow key={p.playerId} player={p} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlayerRow({ player }: { player: PlayerMarket }) {
+  return (
+    <div className="rounded-md border border-border/50 bg-muted/10 p-2.5">
+      <div className="flex items-center gap-2 mb-2">
+        {player.headshot ? (
+          <img src={player.headshot} alt="" className="w-7 h-7 rounded-full object-cover bg-muted" />
+        ) : (
+          <div className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] text-muted-foreground">
+            {player.playerName.split(" ").map((s) => s[0]).slice(0, 2).join("")}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium truncate">{player.playerName}</div>
+          <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            {player.positionLabel} · {player.seasonGoals}G · {player.seasonAssists}A
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {player.markets.map((mk) => (
+          <MarketChip key={mk.key} market={mk} />
+        ))}
+      </div>
     </div>
   );
 }
