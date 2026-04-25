@@ -16,11 +16,17 @@ export interface InjuryReport {
   teamId: number;
   teamName: string;
   teamShortName: string;
+  teamCrestUrl: string;
+  headshotUrl?: string | null;
+  shirtNumber?: number | null;
   position: InjuryReportPosition;
+  positionLabel: string;
   type: InjuryReportType;
   status: string;
   description: string;
+  injuryType?: string | null;
   severity: InjuryReportSeverity;
   expectedReturn?: string | null;
+  injuryDate?: string | null;
   impactScore: number;
 }

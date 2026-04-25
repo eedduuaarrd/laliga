@@ -28,6 +28,8 @@ export * from "./lineupSource";
 export * from "./listMatchesParams";
 export * from "./listMatchesStatus";
 export * from "./listPlayersParams";
+export * from "./liveMarkets";
+export * from "./liveOdds";
 export * from "./marketView";
 export * from "./marketViewSource";
 export * from "./matchDetail";

@@ -7,6 +7,8 @@ import {
   getMatchEvents,
   refereeStubFromName,
 } from "../data/lineups.js";
+import { computeLiveMarkets, getLiveOdds } from "../data/live-markets.js";
+import { getTeamInjuries } from "../data/injuries.js";
 import { type LiveTeam } from "../data/teams.js";
 import {
   ListMatchesResponse,
@@ -72,13 +74,20 @@ router.get("/matches/:id", wrap(async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "Invalid id" });
   const m = await getMatchById(parsed.data.id);
   if (!m) return res.status(404).json({ error: "Match not found" });
-  const [stats, homeLineup, awayLineup, momentum, events] = await Promise.all([
+  const [stats, homeLineup, awayLineup, momentum, events, liveOdds, homeInj, awayInj] = await Promise.all([
     getMatchStats(m),
     buildLineupFor(m, "home"),
     buildLineupFor(m, "away"),
     getMatchMomentum(m),
     getMatchEvents(m),
+    getLiveOdds(m),
+    getTeamInjuries(m.homeTeamId).catch(() => []),
+    getTeamInjuries(m.awayTeamId).catch(() => []),
   ]);
+  const liveMarkets = await computeLiveMarkets(m, stats);
+  const suspensions = [...homeInj, ...awayInj].filter(
+    (i) => i.type === "suspension" || i.severity === "high",
+  );
   const data = GetMatchResponse.parse({
     match: matchSummary(m),
     stats,
@@ -92,6 +101,9 @@ router.get("/matches/:id", wrap(async (req, res) => {
       fetchedAt: new Date().toISOString(),
       cacheTtlSeconds: 30,
     },
+    liveMarkets: liveMarkets ?? null,
+    liveOdds: liveOdds ?? null,
+    suspensions,
   });
   return res.json(data);
 }));

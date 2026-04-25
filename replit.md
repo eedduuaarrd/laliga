@@ -48,12 +48,14 @@ A comprehensive real-time La Liga analytics and prediction platform built on thi
   - `players.ts` — derives season goals/assists/appearances from `/teams/{id}/athletes/{playerId}/statistics`. Headshot URL via athletes index. Shirt number/age nullable per ESPN.
   - `standings.ts` — `/standings` with current matchday gameweek extraction. Home/away splits left as 0 because soccer endpoints don't expose `homeWins` etc.
   - `matches.ts` — scoreboard + summary endpoints. Status mapped to `scheduled|live|finished`. Real kickoffs, scores, and venue.
-  - `lineups.ts` — predicted XI by formation when ESPN doesn't supply official lineups (mostly does for in-progress/finished matches).
-  - `injuries.ts` — `/teams/{id}/injuries`. Severity normalised to `low|medium|high`.
+  - `lineups.ts` — predicted XI by formation when ESPN doesn't supply official lineups; for live/finished matches reads real key events (goals, yellow/red, sub, VAR) from `summary.keyEvents` and real boxscore `statistics` matched to each team. Momentum derived from key events with exponential decay.
+  - `injuries.ts` — ESPN's roster `injuries[]` is empty for La Liga, so the implementation **mines the `/news` feed** for injury/suspension keywords, links each story to its `athlete` + `team` categories, aggregates severity and body part across all related articles, and dedupes per player. Returns enriched records with headshot, shirt number, position label, body part, severity, time-since-notification, and an impact score (position weight × severity).
+  - `live-markets.ts` — in-play markets computed from live state via Poisson on remaining time: 1X2, next goal, O/U 2.5/3.5, BTTS, clean sheet, cards O/U 3.5/4.5/5.5, corners O/U 8.5/9.5. `getLiveOdds()` parses real DraftKings moneylines, spread, and totals from `pickcenter`, with derived implied probabilities.
   - `predictions.ts` — **bookmaker-blended Poisson model**. Pulls `pickcenter` (DraftKings odds) when available, blends 70% market / 30% Poisson on team xG. Player props derived from real season per-game rates × predicted team xG. `Prediction.source` = `bookmaker` or `model`; `bookmaker` and `oddsLastUpdate` exposed to the UI.
-- `artifacts/api-server/src/routes/` — One file per resource. New endpoints added in v0.2.0:
+- `artifacts/api-server/src/routes/` — One file per resource. Endpoints added in v0.2.0:
   - `GET /api/predictions/{matchId}/players` → anytime scorer / 2+ goals / anytime assist / G+A probabilities per player.
   - `GET /api/predictions/{matchId}/lineups` → probable XI + bench per side with formation and confidence.
+  - `GET /api/matches/{id}` now returns `liveMarkets`, `liveOdds`, and `suspensions[]` (filtered injuries for the two clubs) for live or recent matches.
 - All routes are mounted under `/api`.
 
 ### Frontend pages

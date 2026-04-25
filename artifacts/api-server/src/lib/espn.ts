@@ -165,12 +165,33 @@ export interface RawLeadersBlock {
   leaders: RawLeader[];
 }
 
+export interface RawKeyEvent {
+  id: string;
+  type?: { id?: string; text?: string; type?: string };
+  text?: string;
+  shortText?: string;
+  period?: { number: number };
+  clock?: { value?: number; displayValue?: string };
+  scoringPlay?: boolean;
+  team?: { id: string; displayName?: string };
+  participants?: { athlete?: { id?: string; displayName?: string } }[];
+  athletesInvolved?: { id?: string; displayName?: string }[];
+  wallclock?: string;
+}
+
+export interface RawBoxscoreTeam {
+  team: RawTeamRef;
+  statistics?: { name: string; displayValue?: string; label?: string }[];
+}
+
 export interface RawSummary {
   rosters?: { homeAway: "home" | "away"; team: RawTeamRef; roster?: { athlete: RawAthlete; starter?: boolean; subbedIn?: boolean; position?: { abbreviation: string } }[]; formation?: string }[];
   leaders?: RawLeadersBlock[];
   pickcenter?: RawOdds[];
   odds?: RawOdds[];
   hasOdds?: boolean;
+  keyEvents?: RawKeyEvent[];
+  boxscore?: { teams?: RawBoxscoreTeam[] };
   headToHeadGames?: { team: RawTeamRef; events?: { id: string; date: string; name?: string; shortName?: string; competitors?: { homeAway: string; team: RawTeamRef; score?: string; winner?: boolean }[] }[] }[];
   header?: {
     competitions?: {
@@ -223,6 +244,29 @@ export async function getScoreboardRange(start: Date, end: Date): Promise<RawSco
 export async function getEventSummary(eventId: string | number): Promise<RawSummary> {
   const url = `${SITE_BASE}/summary?event=${eventId}`;
   return cached(`summary:${eventId}`, 30, () => fetchJson<RawSummary>(url));
+}
+
+export interface RawNewsArticle {
+  id: number;
+  headline: string;
+  description?: string;
+  published: string;
+  lastModified?: string;
+  images?: { url?: string; type?: string; caption?: string }[];
+  categories?: {
+    type?: string;
+    description?: string;
+    athlete?: { id: number; description?: string };
+    team?: { id: number; description?: string };
+  }[];
+  links?: { web?: { href: string } };
+}
+export interface RawNewsResponse {
+  articles?: RawNewsArticle[];
+}
+export async function getLeagueNews(limit = 50): Promise<RawNewsResponse> {
+  const url = `${SITE_BASE}/news?limit=${limit}`;
+  return cached(`news:${limit}`, 300, () => fetchJson<RawNewsResponse>(url));
 }
 
 export async function getStandings(season?: number): Promise<RawStandingsResponse> {

@@ -27,6 +27,10 @@ export interface LivePlayer {
   // Status flags
   injured: boolean;
   injuryStatus: string | null;
+  injuryType: string | null;
+  injuryDetail: string | null;
+  injuryDate: string | null;
+  expectedReturn: string | null;
 }
 
 const POS_MAP: Record<string, PlayerPosition> = {
@@ -72,6 +76,10 @@ function shapePlayer(a: RawAthlete, teamId: number): LivePlayer {
     rating: 0,
     injured: !!inj,
     injuryStatus: inj?.status ?? null,
+    injuryType: inj?.details?.type ?? null,
+    injuryDetail: inj?.details?.detail ?? null,
+    injuryDate: inj?.date ?? null,
+    expectedReturn: inj?.details?.returnDate ?? null,
   };
 }
 

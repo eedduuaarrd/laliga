@@ -263,34 +263,48 @@ export interface RefereeStats {
   penaltiesGiven: number;
 }
 
-export interface MatchDetail {
-  match: MatchSummary;
-  stats: MatchStats;
-  homeLineup: Lineup;
-  awayLineup: Lineup;
-  momentum: MomentumPoint[];
-  events: MatchEvent[];
-  refereeStats: RefereeStats;
-  dataSource?: DataSource;
+export interface LiveMarkets {
+  asOfMinute?: number | null;
+  asOfHomeScore: number;
+  asOfAwayScore: number;
+  homeWinProb: number;
+  drawProb: number;
+  awayWinProb: number;
+  expectedRemainingHomeGoals: number;
+  expectedRemainingAwayGoals: number;
+  nextGoalHome: number;
+  nextGoalAway: number;
+  nextGoalNone: number;
+  over25Prob: number;
+  under25Prob: number;
+  over35Prob: number;
+  bttsProb: number;
+  cleanSheetHome: number;
+  cleanSheetAway: number;
+  over35CardsProb: number;
+  over45CardsProb: number;
+  over55CardsProb: number;
+  expectedTotalCards: number;
+  over85CornersProb: number;
+  over95CornersProb: number;
+  expectedTotalCorners: number;
+  recommendation: string;
 }
 
-export type PlayerDetailRadarItem = {
-  metric: string;
-  value: number;
-  max: number;
-};
-
-export type PlayerDetailRecentFormItem = {
-  matchLabel: string;
-  rating: number;
-  goals: number;
-  assists: number;
-};
-
-export interface PlayerDetail {
-  player: Player;
-  radar: PlayerDetailRadarItem[];
-  recentForm: PlayerDetailRecentFormItem[];
+export interface LiveOdds {
+  bookmaker: string;
+  asOf: string;
+  homeMoneyline?: number | null;
+  drawMoneyline?: number | null;
+  awayMoneyline?: number | null;
+  spread?: number | null;
+  spreadDetails?: string | null;
+  overUnder?: number | null;
+  overOdds?: number | null;
+  underOdds?: number | null;
+  homeImpliedProb: number;
+  drawImpliedProb: number;
+  awayImpliedProb: number;
 }
 
 export type InjuryReportPosition =
@@ -328,13 +342,52 @@ export interface InjuryReport {
   teamId: number;
   teamName: string;
   teamShortName: string;
+  teamCrestUrl: string;
+  headshotUrl?: string | null;
+  shirtNumber?: number | null;
   position: InjuryReportPosition;
+  positionLabel: string;
   type: InjuryReportType;
   status: string;
   description: string;
+  injuryType?: string | null;
   severity: InjuryReportSeverity;
   expectedReturn?: string | null;
+  injuryDate?: string | null;
   impactScore: number;
+}
+
+export interface MatchDetail {
+  match: MatchSummary;
+  stats: MatchStats;
+  homeLineup: Lineup;
+  awayLineup: Lineup;
+  momentum: MomentumPoint[];
+  events: MatchEvent[];
+  refereeStats: RefereeStats;
+  dataSource?: DataSource;
+  liveMarkets?: LiveMarkets | null;
+  liveOdds?: LiveOdds | null;
+  suspensions?: InjuryReport[];
+}
+
+export type PlayerDetailRadarItem = {
+  metric: string;
+  value: number;
+  max: number;
+};
+
+export type PlayerDetailRecentFormItem = {
+  matchLabel: string;
+  rating: number;
+  goals: number;
+  assists: number;
+};
+
+export interface PlayerDetail {
+  player: Player;
+  radar: PlayerDetailRadarItem[];
+  recentForm: PlayerDetailRecentFormItem[];
 }
 
 export type PredictionSource =

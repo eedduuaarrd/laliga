@@ -6,7 +6,10 @@
  * OpenAPI spec version: 0.2.0
  */
 import type { DataSource } from "./dataSource";
+import type { InjuryReport } from "./injuryReport";
 import type { Lineup } from "./lineup";
+import type { LiveMarkets } from "./liveMarkets";
+import type { LiveOdds } from "./liveOdds";
 import type { MatchEvent } from "./matchEvent";
 import type { MatchStats } from "./matchStats";
 import type { MatchSummary } from "./matchSummary";
@@ -22,4 +25,7 @@ export interface MatchDetail {
   events: MatchEvent[];
   refereeStats: RefereeStats;
   dataSource?: DataSource;
+  liveMarkets?: LiveMarkets | null;
+  liveOdds?: LiveOdds | null;
+  suspensions?: InjuryReport[];
 }

@@ -414,7 +414,60 @@ components:
           items: { $ref: "#/components/schemas/MatchEvent" }
         refereeStats: { $ref: "#/components/schemas/RefereeStats" }
         dataSource: { $ref: "#/components/schemas/DataSource" }
+        liveMarkets: { $ref: "#/components/schemas/LiveMarkets", nullable: true }
+        liveOdds: { $ref: "#/components/schemas/LiveOdds", nullable: true }
+        suspensions:
+          type: array
+          items: { $ref: "#/components/schemas/InjuryReport" }
       required: [match, stats, homeLineup, awayLineup, momentum, events, refereeStats]
+
+    LiveOdds:
+      type: object
+      properties:
+        bookmaker: { type: string }
+        asOf: { type: string, format: date-time }
+        homeMoneyline: { type: integer, nullable: true }
+        drawMoneyline: { type: integer, nullable: true }
+        awayMoneyline: { type: integer, nullable: true }
+        spread: { type: number, nullable: true }
+        spreadDetails: { type: string, nullable: true }
+        overUnder: { type: number, nullable: true }
+        overOdds: { type: integer, nullable: true }
+        underOdds: { type: integer, nullable: true }
+        homeImpliedProb: { type: number }
+        drawImpliedProb: { type: number }
+        awayImpliedProb: { type: number }
+      required: [bookmaker, asOf, homeImpliedProb, drawImpliedProb, awayImpliedProb]
+
+    LiveMarkets:
+      type: object
+      properties:
+        asOfMinute: { type: integer, nullable: true }
+        asOfHomeScore: { type: integer }
+        asOfAwayScore: { type: integer }
+        homeWinProb: { type: number }
+        drawProb: { type: number }
+        awayWinProb: { type: number }
+        expectedRemainingHomeGoals: { type: number }
+        expectedRemainingAwayGoals: { type: number }
+        nextGoalHome: { type: number }
+        nextGoalAway: { type: number }
+        nextGoalNone: { type: number }
+        over25Prob: { type: number }
+        under25Prob: { type: number }
+        over35Prob: { type: number }
+        bttsProb: { type: number }
+        cleanSheetHome: { type: number }
+        cleanSheetAway: { type: number }
+        over35CardsProb: { type: number }
+        over45CardsProb: { type: number }
+        over55CardsProb: { type: number }
+        expectedTotalCards: { type: number }
+        over85CornersProb: { type: number }
+        over95CornersProb: { type: number }
+        expectedTotalCorners: { type: number }
+        recommendation: { type: string }
+      required: [asOfHomeScore, asOfAwayScore, homeWinProb, drawProb, awayWinProb, expectedRemainingHomeGoals, expectedRemainingAwayGoals, nextGoalHome, nextGoalAway, nextGoalNone, over25Prob, under25Prob, over35Prob, bttsProb, cleanSheetHome, cleanSheetAway, over35CardsProb, over45CardsProb, over55CardsProb, expectedTotalCards, over85CornersProb, over95CornersProb, expectedTotalCorners, recommendation]
 
     MatchStats:
       type: object
@@ -562,14 +615,20 @@ components:
         teamId: { type: integer }
         teamName: { type: string }
         teamShortName: { type: string }
+        teamCrestUrl: { type: string }
+        headshotUrl: { type: string, nullable: true }
+        shirtNumber: { type: integer, nullable: true }
         position: { type: string, enum: [GK, DEF, MID, FWD] }
+        positionLabel: { type: string }
         type: { type: string, enum: [injury, suspension, doubtful] }
         status: { type: string }
         description: { type: string }
+        injuryType: { type: string, nullable: true }
         severity: { type: string, enum: [low, medium, high] }
         expectedReturn: { type: string, nullable: true }
+        injuryDate: { type: string, nullable: true }
         impactScore: { type: number }
-      required: [id, playerId, playerName, teamId, teamName, teamShortName, position, type, status, description, severity, impactScore]
+      required: [id, playerId, playerName, teamId, teamName, teamShortName, teamCrestUrl, position, positionLabel, type, status, description, severity, impactScore]
 
     Prediction:
       type: object
