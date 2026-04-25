@@ -26,30 +26,28 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
-## Bet365 · La Liga Edge (v0.3.0 — April 2026)
+## La Liga Edge (v0.3.1 — April 2026, keyless)
 
-A focused, single-page La Liga betting board centred on bet365 odds plus a probabilistic model. The whole UI is in Catalan with a matte-black aesthetic and a single amber/gold accent.
+A focused, single-page La Liga betting board with REAL bookmaker odds + a probabilistic model. The whole UI is in Catalan with a matte-black aesthetic and a single amber/gold accent. **Zero API keys required.**
 
 ### What it does (single page)
 
-1. Lists every La Liga match in the next 10 days (plus anything live now), each with bet365 odds across 1X2, Over/Under 1.5/2.5/3.5 and BTTS, alongside the model's real probability and the implied edge for every selection.
-2. Suggests **simple bets**, ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with a real model probability ≥ 40%.
+1. Lists every La Liga match in the next 10 days (plus anything live now), each with **real DraftKings odds** for 1X2 and Over/Under 2.5 (pulled keyless from ESPN's public `pickcenter` feed) plus model-derived odds for the remaining markets (Over/Under 1.5/3.5, BTTS Yes/No). Each market is tagged `live` or `model` individually.
+2. Suggests **simple bets**, ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with model probability ≥ 40%; live DraftKings selections are preferred within the same risk tier.
 3. Suggests **combined bets** (2/3/4 legs) built from the strongest pick *per match* (so legs are independent), sorted by joint probability.
 
 ### Artifacts
 
-- `artifacts/laliga-pro` — React + Vite frontend, single page (`/`), matte black palette, gold/amber primary, electric-green accent for positive edges.
-- `artifacts/api-server` — Express + TypeScript backend, ESPN-driven model with optional bet365 odds via The Odds API.
+- `artifacts/laliga-pro` — React + Vite frontend, single page (`/`), matte black palette, gold/amber primary, electric-green accent for positive edges. Per-market source dots (green = live DraftKings, amber = model).
+- `artifacts/api-server` — Express + TypeScript backend, ESPN-driven model + ESPN pickcenter for real DraftKings prices. No third-party API key.
 
-### Bet365 odds layer
+### Real-odds layer (keyless)
 
-- `artifacts/api-server/src/lib/odds-api.ts` — wrapper for [The Odds API](https://the-odds-api.com), filtered to the `bet365` bookmaker, free tier 500 reqs/month. Cached 60 s. Returns `null` when `THE_ODDS_API_KEY` is not configured so the rest of the system can fall back to the model.
-- `artifacts/api-server/src/data/bet365.ts` — builds the board (one entry per match × 11 markets), adds `modelProb` / `impliedProb` / `edge` per selection, and produces the simple/combined bet suggestions sorted by risk tier.
-- `artifacts/api-server/src/routes/bet365.ts` — `GET /api/bet365/board` and `GET /api/bet365/suggestions`. Both responses include `realBet365: boolean` so the UI can mark whether quotes are real bet365 or fall-back model prices.
+- `artifacts/api-server/src/lib/draftkings-odds.ts` — pulls `pickcenter` for any La Liga match via the existing TTL-cached `getEventSummary` helper, picks the DraftKings provider, converts American moneylines (home / draw / away) and Over/Under 2.5 into decimal odds. Returns `null` when ESPN has not yet published a market (typically matches > 4-5 days away).
+- `artifacts/api-server/src/data/bet365.ts` — builds the board (one entry per match × 11 markets), tags each market `live` (real DraftKings price) or `model` (Poisson + 5% overround), computes `modelProb` / `impliedProb` / `edge`, and produces simple/combined bet suggestions sorted by risk tier.
+- `artifacts/api-server/src/routes/bet365.ts` — `GET /api/bet365/board` and `GET /api/bet365/suggestions`. Both responses include `liveMatchCount`, `liveMarketCount`, and `totalMatchCount` so the UI can show whether quotes are real DraftKings, fully model, or a mix.
 
-### Model fall-back (when no API key)
-
-When `THE_ODDS_API_KEY` is not set, every market price is computed from the existing Poisson + bookmaker-blended model in `predictions.ts` (a small 5% overround applied), and the UI clearly labels each market with `MODEL` and shows a banner asking to configure the key. **No quote is ever spoofed as bet365.**
+> File names still say `bet365` for compatibility but the product is now branded **"La Liga Edge"** because the only freely accessible real bookmaker for La Liga without a paid API key is DraftKings (via ESPN). Honest labelling: every real quote is tagged DraftKings; every model quote is tagged MODEL.
 
 ### Backend layout
 
@@ -74,11 +72,11 @@ When `THE_ODDS_API_KEY` is not set, every market price is computed from the exis
   - `GET /api/matches/{id}` now returns `liveMarkets`, `liveOdds`, and `suspensions[]` (filtered injuries for the two clubs) for live or recent matches.
 - All routes are mounted under `/api`.
 
-### Frontend pages (post-v0.3 rewrite)
+### Frontend pages (post-v0.3.1 rewrite)
 
 A single page only: `src/pages/board.tsx` mounted at `/`. The previous Dashboard / Briefing / Matches / Predictions / Standings / Teams / Players / Value Bets / Injuries pages have been removed; their backend routes still exist but are not surfaced.
 
-The layout (`src/components/layout.tsx`) is a thin matte-black topbar with the brand and the live data-source label.
+The layout (`src/components/layout.tsx`) is a thin matte-black topbar with the brand "La Liga Edge", a live source label (`Quotes reals · DraftKings (via ESPN)` or fallback variants), and a `N/M live` badge showing how many matches have real bookmaker prices.
 
 ### Honesty rules (no fabricated data)
 

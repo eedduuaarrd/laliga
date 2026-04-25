@@ -5,8 +5,7 @@ import {
   type Response,
   type NextFunction,
 } from "express";
-import { getBoard, buildSuggestions, getDataSourceLabel } from "../data/bet365.js";
-import { isOddsApiConfigured } from "../lib/odds-api.js";
+import { getBoard, buildSuggestions, describeBoard } from "../data/bet365.js";
 
 const router: IRouter = Router();
 const wrap =
@@ -18,9 +17,12 @@ router.get(
   "/bet365/board",
   wrap(async (_req, res) => {
     const matches = await getBoard();
+    const meta = describeBoard(matches);
     res.json({
-      source: getDataSourceLabel(),
-      realBet365: isOddsApiConfigured(),
+      source: meta.bookmakerLabel,
+      liveMatchCount: meta.liveMatchCount,
+      liveMarketCount: meta.liveMarketCount,
+      totalMatchCount: meta.totalMatchCount,
       matches,
     });
   }),
@@ -29,10 +31,14 @@ router.get(
 router.get(
   "/bet365/suggestions",
   wrap(async (_req, res) => {
+    const matches = await getBoard();
+    const meta = describeBoard(matches);
     const data = await buildSuggestions();
     res.json({
-      source: getDataSourceLabel(),
-      realBet365: isOddsApiConfigured(),
+      source: meta.bookmakerLabel,
+      liveMatchCount: meta.liveMatchCount,
+      liveMarketCount: meta.liveMarketCount,
+      totalMatchCount: meta.totalMatchCount,
       ...data,
     });
   }),

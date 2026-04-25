@@ -17,6 +17,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 // ---------------------------------------------------------------------------
 // Types — match the bet365 routes on the backend
 // ---------------------------------------------------------------------------
+type MarketSource = "live" | "model";
+
 interface Market {
   key: string;
   group: string;
@@ -25,6 +27,7 @@ interface Market {
   modelProb: number;
   impliedProb: number | null;
   edge: number | null;
+  source: MarketSource;
 }
 interface BoardMatch {
   matchId: number;
@@ -39,14 +42,17 @@ interface BoardMatch {
   awayCrest: string;
   homeScore: number | null;
   awayScore: number | null;
-  source: "bet365" | "model";
+  source: MarketSource;
+  bookmaker: string | null;
   oddsLastUpdate: string | null;
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
   markets: Market[];
 }
 interface BoardResponse {
   source: string;
-  realBet365: boolean;
+  liveMatchCount: number;
+  liveMarketCount: number;
+  totalMatchCount: number;
   matches: BoardMatch[];
 }
 
@@ -62,6 +68,7 @@ interface SimpleBet {
   modelProb: number;
   impliedProb: number;
   edge: number;
+  source: MarketSource;
   riskTier: "molt baix" | "baix" | "moderat" | "alt";
   rationale: string;
 }
@@ -73,6 +80,7 @@ interface ComboBet {
     selection: string;
     odds: number;
     modelProb: number;
+    source: MarketSource;
   }[];
   combinedOdds: number;
   combinedProb: number;
@@ -81,7 +89,9 @@ interface ComboBet {
 }
 interface SuggestionsResponse {
   source: string;
-  realBet365: boolean;
+  liveMatchCount: number;
+  liveMarketCount: number;
+  totalMatchCount: number;
   simples: SimpleBet[];
   combos: ComboBet[];
 }
@@ -188,22 +198,21 @@ export default function Board() {
   const upcoming = data?.matches.filter((m) => m.status === "upcoming") ?? [];
 
   return (
-    <Layout source={data?.source ?? null} realBet365={data?.realBet365}>
-      {!data?.realBet365 && (
-        <div className="mb-6 rounded-lg border border-primary/30 bg-primary/5 p-4 text-sm text-primary">
-          <strong className="font-semibold">Quotes en mode model.</strong>{" "}
-          Per veure les quotes reals de bet365 en directe, configura la clau de{" "}
-          <code className="font-mono text-xs">THE_ODDS_API_KEY</code> a Secrets.
-          Pots obtenir-ne una de gratis (500 peticions/mes) a{" "}
-          <a
-            href="https://the-odds-api.com"
-            target="_blank"
-            rel="noreferrer"
-            className="underline hover:text-primary/80"
-          >
-            the-odds-api.com
-          </a>
-          . Mentrestant la web mostra les probabilitats del nostre model.
+    <Layout
+      source={data?.source ?? null}
+      liveCount={data?.liveMatchCount}
+      totalCount={data?.totalMatchCount}
+    >
+      {data && data.liveMarketCount > 0 && data.liveMatchCount < data.totalMatchCount && (
+        <div className="mb-6 rounded-lg border border-accent/25 bg-accent/[0.04] p-4 text-sm text-foreground/80">
+          <strong className="text-accent font-semibold">Quotes mixtes.</strong>{" "}
+          Tenim quotes <span className="text-accent font-semibold">reals de DraftKings</span> per a {data.liveMatchCount} dels {data.totalMatchCount} partits (els més propers). Per als més llunyans encara no hi ha mercats publicats, així que es mostren probabilitats i quotes del nostre model. Cada quota indica la seva font.
+        </div>
+      )}
+      {data && data.liveMarketCount === 0 && data.totalMatchCount > 0 && (
+        <div className="mb-6 rounded-lg border border-primary/25 bg-primary/[0.04] p-4 text-sm text-foreground/80">
+          <strong className="text-primary font-semibold">Mode model.</strong>{" "}
+          DraftKings encara no ha publicat mercats per a aquests partits. Mostrem totes les quotes derivades del model Poisson; es marcaran com a <span className="text-accent font-semibold">live</span> automàticament quan es publiquin.
         </div>
       )}
 
@@ -239,7 +248,7 @@ export default function Board() {
       <section className="mb-12">
         <SectionHeader
           title="Quotes per partit"
-          subtitle="Cada quota mostra el preu de bet365 i la probabilitat real segons el model. Edge positiu = el mercat infravalora aquesta opció."
+          subtitle="Cada quota mostra el preu real de DraftKings (LIVE) o del nostre model (MODEL). Edge positiu = el mercat infravalora aquesta opció."
           icon={<Gauge className="w-5 h-5" />}
         />
         {board.isLoading ? (
@@ -398,12 +407,13 @@ function MatchCard({ match }: { match: BoardMatch }) {
         <span
           className={
             "text-[10px] uppercase tracking-[0.18em] px-2 py-0.5 rounded " +
-            (match.source === "bet365"
+            (match.source === "live"
               ? "bg-accent/10 text-accent ring-1 ring-inset ring-accent/30"
               : "bg-primary/10 text-primary ring-1 ring-inset ring-primary/30")
           }
+          title={match.bookmaker ? `Quotes reals via ${match.bookmaker}` : "Quotes derivades del model"}
         >
-          {match.source}
+          {match.source === "live" ? `live · ${match.bookmaker ?? "draftkings"}` : "model"}
         </span>
       </div>
 
@@ -477,10 +487,11 @@ function MarketChip({ market }: { market: Market }) {
   const edge = market.edge ?? 0;
   const isPositive = edge > 0.02;
   const isNegative = edge < -0.05;
+  const isLive = market.source === "live";
   return (
     <div
       className={
-        "rounded-md px-2.5 py-2 border flex flex-col gap-0.5 " +
+        "relative rounded-md px-2.5 py-2 border flex flex-col gap-0.5 " +
         (isPositive
           ? "border-accent/40 bg-accent/[0.06]"
           : isNegative
@@ -489,7 +500,16 @@ function MarketChip({ market }: { market: Market }) {
       }
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] truncate text-foreground/90">{market.selection}</span>
+        <span className="text-[11px] truncate text-foreground/90 flex items-center gap-1">
+          <span
+            className={
+              "inline-block w-1.5 h-1.5 rounded-full " +
+              (isLive ? "bg-accent" : "bg-primary/70")
+            }
+            title={isLive ? "Quota real DraftKings" : "Quota generada pel model"}
+          />
+          <span className="truncate">{market.selection}</span>
+        </span>
         <span className="font-mono text-sm font-semibold">
           {market.odds ? market.odds.toFixed(2) : "—"}
         </span>
@@ -528,7 +548,16 @@ function SimpleBetRow({ bet, index }: { bet: SimpleBet; index: number }) {
         </span>
       </div>
       <div className="md:col-span-3 flex flex-col">
-        <span className="font-semibold text-sm">{bet.selection}</span>
+        <span className="font-semibold text-sm flex items-center gap-1.5">
+          <span
+            className={
+              "inline-block w-1.5 h-1.5 rounded-full " +
+              (bet.source === "live" ? "bg-accent" : "bg-primary/70")
+            }
+            title={bet.source === "live" ? "Quota real DraftKings" : "Quota del model"}
+          />
+          {bet.selection}
+        </span>
         <span className="text-[11px] text-muted-foreground">{bet.market} · {bet.rationale}</span>
       </div>
       <div className="md:col-span-1 text-center flex md:block items-center justify-between">
@@ -581,7 +610,15 @@ function ComboCard({ combo }: { combo: ComboBet }) {
           >
             <ChevronRight className="w-4 h-4 text-primary shrink-0" />
             <div className="min-w-0 flex-1">
-              <div className="font-medium truncate">{leg.matchLabel}</div>
+              <div className="font-medium truncate flex items-center gap-1.5">
+                <span
+                  className={
+                    "inline-block w-1.5 h-1.5 rounded-full shrink-0 " +
+                    (leg.source === "live" ? "bg-accent" : "bg-primary/70")
+                  }
+                />
+                {leg.matchLabel}
+              </div>
               <div className="text-[11px] text-muted-foreground">
                 {leg.market} · {leg.selection}
               </div>

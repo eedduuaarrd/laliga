@@ -1,15 +1,14 @@
-// The bet365 board: combines real bet365 odds (when THE_ODDS_API_KEY is
-// configured) with the underlying Poisson model to compute model probabilities
-// per market, edges, and finally a sorted list of recommended simple and
-// combined bets.
+// Betting board: combines REAL DraftKings odds (pulled keyless from ESPN's
+// public pickcenter feed) with the underlying Poisson model. For each match we
+// expose one card per market with the bookmaker price (when real) or the model
+// price (clearly labelled), plus the model probability and the implied edge.
+// Then we generate ordered simple-bet and combo-bet recommendations.
 
 import { getMatchesByStatus, type LiveMatch } from "./matches.js";
 import { predictMatch } from "./predictions.js";
-import {
-  getBet365OddsForMatch,
-  isOddsApiConfigured,
-  type Bet365Odds,
-} from "../lib/odds-api.js";
+import { getLiveOddsForMatch, type LiveOddsSnapshot } from "../lib/draftkings-odds.js";
+
+export type MarketSource = "live" | "model";
 
 export interface BoardMarket {
   key: string;
@@ -19,6 +18,7 @@ export interface BoardMarket {
   modelProb: number;
   impliedProb: number | null;
   edge: number | null; // model_prob * odds - 1
+  source: MarketSource;
 }
 
 export interface BoardMatch {
@@ -34,7 +34,9 @@ export interface BoardMatch {
   awayCrest: string;
   homeScore: number | null;
   awayScore: number | null;
-  source: "bet365" | "model";
+  /** "live" when at least one real bookmaker market is available, else "model". */
+  source: MarketSource;
+  bookmaker: string | null;
   oddsLastUpdate: string | null;
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
   markets: BoardMarket[];
@@ -54,11 +56,12 @@ function buildMarketRow(
   key: string,
   group: string,
   selection: string,
-  bet365Odd: number | null | undefined,
+  liveOdd: number | null | undefined,
   modelProb: number,
 ): BoardMarket {
   const p = clamp01(modelProb);
-  const odds = bet365Odd ?? modelOdds(p);
+  const realOdd = liveOdd && liveOdd > 1.001 ? liveOdd : null;
+  const odds = realOdd ?? modelOdds(p);
   const impliedProb = odds > 0 ? +(1 / odds).toFixed(4) : null;
   const edge = +(p * odds - 1).toFixed(4);
   return {
@@ -69,6 +72,7 @@ function buildMarketRow(
     modelProb: +p.toFixed(4),
     impliedProb,
     edge,
+    source: realOdd ? "live" : "model",
   };
 }
 
@@ -82,12 +86,7 @@ function probOver(matrix: { homeGoals: number; awayGoals: number; probability: n
 
 export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
   const { prediction, poisson } = await predictMatch(m);
-
-  let bet365: Bet365Odds | null = null;
-  if (isOddsApiConfigured()) {
-    bet365 = await getBet365OddsForMatch(m.homeTeam.name, m.awayTeam.name);
-  }
-  const source: BoardMatch["source"] = bet365 ? "bet365" : "model";
+  const live: LiveOddsSnapshot | null = await getLiveOddsForMatch(m.id).catch(() => null);
 
   const probHome = prediction.homeWinProb;
   const probDraw = prediction.drawProb;
@@ -97,22 +96,29 @@ export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
   const probOver35 = probOver(poisson.matrix, 3);
   const probBttsYes = prediction.bttsProb;
 
+  // Real DK markets: 1X2 + Over/Under 2.5 (when totalLine matches 2.5).
+  const liveOver25 = live && live.totalLine === 2.5 ? live.over : null;
+  const liveUnder25 = live && live.totalLine === 2.5 ? live.under : null;
+
   const markets: BoardMarket[] = [
-    buildMarketRow("1x2-home", "1X2", `${m.homeTeam.shortName} guanya`, bet365?.home, probHome),
-    buildMarketRow("1x2-draw", "1X2", "Empat", bet365?.draw, probDraw),
-    buildMarketRow("1x2-away", "1X2", `${m.awayTeam.shortName} guanya`, bet365?.away, probAway),
-    buildMarketRow("ou-15-over", "Gols", "Over 1.5", bet365?.over15, probOver15),
-    buildMarketRow("ou-15-under", "Gols", "Under 1.5", bet365?.under15, 1 - probOver15),
-    buildMarketRow("ou-25-over", "Gols", "Over 2.5", bet365?.over25, probOver25),
-    buildMarketRow("ou-25-under", "Gols", "Under 2.5", bet365?.under25, 1 - probOver25),
-    buildMarketRow("ou-35-over", "Gols", "Over 3.5", bet365?.over35, probOver35),
-    buildMarketRow("ou-35-under", "Gols", "Under 3.5", bet365?.under35, 1 - probOver35),
-    buildMarketRow("btts-yes", "BTTS", "Sí", bet365?.bttsYes, probBttsYes),
-    buildMarketRow("btts-no", "BTTS", "No", bet365?.bttsNo, 1 - probBttsYes),
+    buildMarketRow("1x2-home", "1X2", `${m.homeTeam.shortName} guanya`, live?.home, probHome),
+    buildMarketRow("1x2-draw", "1X2", "Empat", live?.draw, probDraw),
+    buildMarketRow("1x2-away", "1X2", `${m.awayTeam.shortName} guanya`, live?.away, probAway),
+    buildMarketRow("ou-15-over", "Gols", "Over 1.5", null, probOver15),
+    buildMarketRow("ou-15-under", "Gols", "Under 1.5", null, 1 - probOver15),
+    buildMarketRow("ou-25-over", "Gols", "Over 2.5", liveOver25, probOver25),
+    buildMarketRow("ou-25-under", "Gols", "Under 2.5", liveUnder25, 1 - probOver25),
+    buildMarketRow("ou-35-over", "Gols", "Over 3.5", null, probOver35),
+    buildMarketRow("ou-35-under", "Gols", "Under 3.5", null, 1 - probOver35),
+    buildMarketRow("btts-yes", "BTTS", "Sí", null, probBttsYes),
+    buildMarketRow("btts-no", "BTTS", "No", null, 1 - probBttsYes),
   ];
 
+  const hasAnyLive = markets.some((mk) => mk.source === "live");
+  const matchSource: MarketSource = hasAnyLive ? "live" : "model";
+
   // Top pick = highest model probability across all markets, restricted to
-  // markets where odds exist and modelProb >= 0.45 (no fanciful suggestions).
+  // markets where the price is realistic (modelProb >= 0.45) and odds exist.
   const candidates = markets.filter((mk) => mk.odds && mk.modelProb >= 0.45);
   candidates.sort((a, b) => b.modelProb - a.modelProb);
   const top = candidates[0]
@@ -132,8 +138,9 @@ export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
     awayCrest: m.awayTeam.crestUrl,
     homeScore: m.homeScore,
     awayScore: m.awayScore,
-    source,
-    oddsLastUpdate: bet365?.lastUpdate ?? prediction.oddsLastUpdate,
+    source: matchSource,
+    bookmaker: live?.bookmaker ?? null,
+    oddsLastUpdate: live?.fetchedAt ?? prediction.oddsLastUpdate,
     topPick: top,
     markets,
   };
@@ -179,6 +186,7 @@ export interface SimpleBet {
   modelProb: number;
   impliedProb: number;
   edge: number;
+  source: MarketSource;
   riskTier: "molt baix" | "baix" | "moderat" | "alt";
   rationale: string;
 }
@@ -191,6 +199,7 @@ export interface ComboBet {
     selection: string;
     odds: number;
     modelProb: number;
+    source: MarketSource;
   }[];
   combinedOdds: number;
   combinedProb: number;
@@ -212,7 +221,8 @@ function tierForCombo(p: number): ComboBet["riskTier"] {
   return "molt alt";
 }
 
-function rationaleFor(modelProb: number, edge: number): string {
+function rationaleFor(modelProb: number, edge: number, source: MarketSource): string {
+  const src = source === "live" ? "DraftKings" : "el model";
   if (modelProb >= 0.78) {
     return "Probabilitat molt alta segons el model: poques sorpreses esperades.";
   }
@@ -220,7 +230,7 @@ function rationaleFor(modelProb: number, edge: number): string {
     return "Model favorable amb base estadística sòlida.";
   }
   if (edge > 0.10) {
-    return `Edge de +${(edge * 100).toFixed(1)}%: bet365 sembla infravalorar aquesta opció.`;
+    return `Edge de +${(edge * 100).toFixed(1)}%: ${src} sembla infravalorar aquesta opció.`;
   }
   if (modelProb >= 0.48) {
     return "Probabilitat moderada amb risc raonable i bona quota.";
@@ -253,17 +263,19 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         modelProb: mk.modelProb,
         impliedProb: mk.impliedProb ?? 0,
         edge,
+        source: mk.source,
         riskTier: tierForProb(mk.modelProb),
-        rationale: rationaleFor(mk.modelProb, edge),
+        rationale: rationaleFor(mk.modelProb, edge, mk.source),
       });
     }
   }
 
-  // Sort: lowest risk first; within tier, prefer higher edge then higher prob.
+  // Sort: lowest risk first; within tier, prefer real DraftKings then higher edge then higher prob.
   const tierOrder = { "molt baix": 0, baix: 1, moderat: 2, alt: 3 } as const;
   simples.sort((a, b) => {
     if (tierOrder[a.riskTier] !== tierOrder[b.riskTier])
       return tierOrder[a.riskTier] - tierOrder[b.riskTier];
+    if (a.source !== b.source) return a.source === "live" ? -1 : 1;
     if (Math.abs(b.edge - a.edge) > 0.02) return b.edge - a.edge;
     return b.modelProb - a.modelProb;
   });
@@ -293,6 +305,7 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         selection: l.selection,
         odds: l.odds,
         modelProb: l.modelProb,
+        source: l.source,
       })),
       combinedOdds,
       combinedProb,
@@ -337,8 +350,32 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
   };
 }
 
-export function getDataSourceLabel(): string {
-  return isOddsApiConfigured()
-    ? "Quotes en directe · bet365 (via The Odds API)"
-    : "Mode model · clau de bet365 no configurada";
+export interface BoardMeta {
+  bookmakerLabel: string;
+  liveMatchCount: number;
+  liveMarketCount: number;
+  totalMatchCount: number;
+}
+
+export function describeBoard(board: BoardMatch[]): BoardMeta {
+  let liveMatchCount = 0;
+  let liveMarketCount = 0;
+  for (const m of board) {
+    if (m.source === "live") liveMatchCount++;
+    for (const mk of m.markets) if (mk.source === "live") liveMarketCount++;
+  }
+  let bookmakerLabel: string;
+  if (liveMarketCount === 0) {
+    bookmakerLabel = "Mode model · sense quotes en directe";
+  } else if (liveMatchCount === board.length) {
+    bookmakerLabel = "Quotes reals · DraftKings (via ESPN)";
+  } else {
+    bookmakerLabel = `Quotes reals (${liveMatchCount}/${board.length}) · DraftKings + model`;
+  }
+  return {
+    bookmakerLabel,
+    liveMatchCount,
+    liveMarketCount,
+    totalMatchCount: board.length,
+  };
 }
