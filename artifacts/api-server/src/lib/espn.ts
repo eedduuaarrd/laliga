@@ -1,14 +1,15 @@
 import { cached } from "./cache.js";
 import { logger } from "./logger.js";
+import { DEFAULT_LEAGUE } from "./leagues.js";
 
-const SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1";
-const WEB_BASE = "https://site.web.api.espn.com/apis/v2/sports/soccer/esp.1";
-const COMMON_BASE = "https://site.web.api.espn.com/apis/common/v3/sports/soccer/esp.1";
+const SITE_BASE = (lg: string) => `https://site.api.espn.com/apis/site/v2/sports/soccer/${lg}`;
+const WEB_BASE = (lg: string) => `https://site.web.api.espn.com/apis/v2/sports/soccer/${lg}`;
+const COMMON_BASE = (lg: string) => `https://site.web.api.espn.com/apis/common/v3/sports/soccer/${lg}`;
 
 const HEADERS: Record<string, string> = {
   Accept: "application/json",
   "User-Agent":
-    "Mozilla/5.0 (compatible; LaLigaProAnalytics/1.0; +https://replit.com)",
+    "Mozilla/5.0 (compatible; FutbolEdgeAnalytics/1.0; +https://replit.com)",
 };
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -224,26 +225,26 @@ export interface RawAthleteStats {
 }
 
 // ============================================================================
-// Public client API
+// Public client API — every function accepts an optional `league` parameter
+// (defaulting to La Liga) so callers that haven't been migrated still work.
 // ============================================================================
 
-export async function getScoreboard(date?: Date): Promise<RawScoreboard> {
+export async function getScoreboard(date?: Date, league: string = DEFAULT_LEAGUE): Promise<RawScoreboard> {
   const dateParam = date ? `?dates=${ymd(date)}` : "";
-  const url = `${SITE_BASE}/scoreboard${dateParam}`;
-  // Live data: 30s cache for current day; 5 min for past/future days
+  const url = `${SITE_BASE(league)}/scoreboard${dateParam}`;
   const isLiveQuery = !date || Math.abs(date.getTime() - Date.now()) < 36 * 3600 * 1000;
-  return cached(`scoreboard:${dateParam || "now"}`, isLiveQuery ? 30 : 300, () => fetchJson<RawScoreboard>(url));
+  return cached(`scoreboard:${league}:${dateParam || "now"}`, isLiveQuery ? 30 : 300, () => fetchJson<RawScoreboard>(url));
 }
 
-export async function getScoreboardRange(start: Date, end: Date): Promise<RawScoreboard> {
+export async function getScoreboardRange(start: Date, end: Date, league: string = DEFAULT_LEAGUE): Promise<RawScoreboard> {
   const range = dateRangeStr(start, end);
-  const url = `${SITE_BASE}/scoreboard?dates=${range}`;
-  return cached(`scoreboard:range:${range}`, 60, () => fetchJson<RawScoreboard>(url));
+  const url = `${SITE_BASE(league)}/scoreboard?dates=${range}`;
+  return cached(`scoreboard:range:${league}:${range}`, 60, () => fetchJson<RawScoreboard>(url));
 }
 
-export async function getEventSummary(eventId: string | number): Promise<RawSummary> {
-  const url = `${SITE_BASE}/summary?event=${eventId}`;
-  return cached(`summary:${eventId}`, 30, () => fetchJson<RawSummary>(url));
+export async function getEventSummary(eventId: string | number, league: string = DEFAULT_LEAGUE): Promise<RawSummary> {
+  const url = `${SITE_BASE(league)}/summary?event=${eventId}`;
+  return cached(`summary:${league}:${eventId}`, 30, () => fetchJson<RawSummary>(url));
 }
 
 export interface RawNewsArticle {
@@ -264,15 +265,15 @@ export interface RawNewsArticle {
 export interface RawNewsResponse {
   articles?: RawNewsArticle[];
 }
-export async function getLeagueNews(limit = 50): Promise<RawNewsResponse> {
-  const url = `${SITE_BASE}/news?limit=${limit}`;
-  return cached(`news:${limit}`, 300, () => fetchJson<RawNewsResponse>(url));
+export async function getLeagueNews(limit = 50, league: string = DEFAULT_LEAGUE): Promise<RawNewsResponse> {
+  const url = `${SITE_BASE(league)}/news?limit=${limit}`;
+  return cached(`news:${league}:${limit}`, 300, () => fetchJson<RawNewsResponse>(url));
 }
 
-export async function getStandings(season?: number): Promise<RawStandingsResponse> {
+export async function getStandings(season?: number, league: string = DEFAULT_LEAGUE): Promise<RawStandingsResponse> {
   const seasonParam = season ? `?season=${season}` : "";
-  const url = `${WEB_BASE}/standings${seasonParam}`;
-  return cached(`standings:${seasonParam || "current"}`, 600, () => fetchJson<RawStandingsResponse>(url));
+  const url = `${WEB_BASE(league)}/standings${seasonParam}`;
+  return cached(`standings:${league}:${seasonParam || "current"}`, 600, () => fetchJson<RawStandingsResponse>(url));
 }
 
 export interface RawTeamsList {
@@ -283,25 +284,25 @@ export interface RawTeamsList {
     }[];
   }[];
 }
-export async function getTeamsList(): Promise<RawTeamsList> {
-  const url = `${SITE_BASE}/teams`;
-  return cached("teams:list", 24 * 3600, () => fetchJson<RawTeamsList>(url));
+export async function getTeamsList(league: string = DEFAULT_LEAGUE): Promise<RawTeamsList> {
+  const url = `${SITE_BASE(league)}/teams`;
+  return cached(`teams:list:${league}`, 24 * 3600, () => fetchJson<RawTeamsList>(url));
 }
 
-export async function getTeamRoster(teamId: string | number): Promise<RawRosterResponse> {
-  const url = `${SITE_BASE}/teams/${teamId}/roster`;
-  return cached(`roster:${teamId}`, 12 * 3600, () => fetchJson<RawRosterResponse>(url));
+export async function getTeamRoster(teamId: string | number, league: string = DEFAULT_LEAGUE): Promise<RawRosterResponse> {
+  const url = `${SITE_BASE(league)}/teams/${teamId}/roster`;
+  return cached(`roster:${league}:${teamId}`, 12 * 3600, () => fetchJson<RawRosterResponse>(url));
 }
 
-export async function getTeamDetail(teamId: string | number): Promise<RawTeamDetail> {
-  const url = `${SITE_BASE}/teams/${teamId}`;
-  return cached(`team:${teamId}`, 6 * 3600, () => fetchJson<RawTeamDetail>(url));
+export async function getTeamDetail(teamId: string | number, league: string = DEFAULT_LEAGUE): Promise<RawTeamDetail> {
+  const url = `${SITE_BASE(league)}/teams/${teamId}`;
+  return cached(`team:${league}:${teamId}`, 6 * 3600, () => fetchJson<RawTeamDetail>(url));
 }
 
-export async function getAthleteStats(athleteId: string | number, season?: number): Promise<RawAthleteStats> {
+export async function getAthleteStats(athleteId: string | number, season?: number, league: string = DEFAULT_LEAGUE): Promise<RawAthleteStats> {
   const seasonParam = season ? `?season=${season}` : "";
-  const url = `${COMMON_BASE}/athletes/${athleteId}/stats${seasonParam}`;
-  return cached(`athlete:${athleteId}:${seasonParam || "current"}`, 12 * 3600, () => fetchJson<RawAthleteStats>(url));
+  const url = `${COMMON_BASE(league)}/athletes/${athleteId}/stats${seasonParam}`;
+  return cached(`athlete:${league}:${athleteId}:${seasonParam || "current"}`, 12 * 3600, () => fetchJson<RawAthleteStats>(url));
 }
 
 // ============================================================================
