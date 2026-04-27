@@ -13,6 +13,7 @@ import {
   americanToDecimalOdds,
   type RawOdds,
 } from "./espn.js";
+import { DEFAULT_LEAGUE } from "./leagues.js";
 
 export interface LiveOddsSnapshot {
   /** Source bookmaker, always "DraftKings" today (ESPN's only soccer feed). */
@@ -44,14 +45,15 @@ function pickPrimaryOdds(summary: { pickcenter?: RawOdds[]; odds?: RawOdds[] } |
 }
 
 /**
- * Fetch real DraftKings 1X2 + O/U 2.5 prices for a single La Liga match.
- * Returns null when ESPN has no pickcenter feed for the match yet (typically
- * matches that are still > 4-5 days away).
+ * Fetch real DraftKings 1X2 + O/U 2.5 prices for a single match. Returns null
+ * when ESPN has no pickcenter feed for the match yet (typically matches that
+ * are still > 4-5 days away). The `league` parameter selects the ESPN slug so
+ * the same helper works for La Liga, Premier League, Champions League, etc.
  */
-export async function getLiveOddsForMatch(matchId: number): Promise<LiveOddsSnapshot | null> {
+export async function getLiveOddsForMatch(matchId: number, league: string = DEFAULT_LEAGUE): Promise<LiveOddsSnapshot | null> {
   let summary;
   try {
-    summary = await getEventSummary(matchId);
+    summary = await getEventSummary(matchId, league);
   } catch {
     return null;
   }

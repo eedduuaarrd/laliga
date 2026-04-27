@@ -83,8 +83,8 @@ function shapePlayer(a: RawAthlete, teamId: number): LivePlayer {
   };
 }
 
-export async function getTeamSquad(teamId: number): Promise<LivePlayer[]> {
-  const roster = await getTeamRoster(teamId);
+export async function getTeamSquad(teamId: number, league?: string): Promise<LivePlayer[]> {
+  const roster = await getTeamRoster(teamId, league);
   return (roster.athletes ?? []).map((a) => shapePlayer(a, teamId));
 }
 

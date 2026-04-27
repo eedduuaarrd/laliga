@@ -53,6 +53,15 @@ interface PlayerMarket {
   seasonAssists: number;
   markets: Market[];
 }
+interface League {
+  code: string;
+  name: string;
+  shortName: string;
+  country: string;
+  flag: string;
+  color: string;
+  tier: number;
+}
 interface BoardMatch {
   matchId: number;
   status: "live" | "upcoming";
@@ -72,6 +81,7 @@ interface BoardMatch {
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
   markets: Market[];
   playerMarkets: PlayerMarket[];
+  league: League;
 }
 interface BoardResponse {
   source: string;
@@ -147,13 +157,15 @@ function useSuggestions() {
 function useBankroll(): [number, (n: number) => void] {
   const [v, setV] = useState<number>(() => {
     if (typeof window === "undefined") return 100;
-    const stored = window.localStorage.getItem("laliga-edge-bankroll");
+    const stored =
+      window.localStorage.getItem("futbol-edge-bankroll") ??
+      window.localStorage.getItem("laliga-edge-bankroll");
     const n = stored ? parseFloat(stored) : NaN;
     return isFinite(n) && n > 0 ? n : 100;
   });
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("laliga-edge-bankroll", String(v));
+    window.localStorage.setItem("futbol-edge-bankroll", String(v));
   }, [v]);
   return [v, setV];
 }
@@ -219,8 +231,9 @@ interface Filters {
   risk: RiskFilter;
   query: string;
   source: SourceFilter;
+  league: string; // "all" or league code
 }
-const DEFAULT_FILTERS: Filters = { risk: "all", query: "", source: "all" };
+const DEFAULT_FILTERS: Filters = { risk: "all", query: "", source: "all", league: "all" };
 
 function matchesFilter(label: string, q: string): boolean {
   if (!q) return true;
@@ -260,12 +273,30 @@ export default function Board() {
   const live = data?.matches.filter((m) => m.status === "live") ?? [];
   const upcoming = data?.matches.filter((m) => m.status === "upcoming") ?? [];
 
+  // -------- map matchId -> league for cross-referencing simples
+  const leagueByMatch = useMemo(() => {
+    const map = new Map<number, League>();
+    for (const m of data?.matches ?? []) map.set(m.matchId, m.league);
+    return map;
+  }, [data]);
+
+  // -------- list of leagues currently present (for the filter chips)
+  const availableLeagues = useMemo<League[]>(() => {
+    const map = new Map<string, League>();
+    for (const m of data?.matches ?? []) if (!map.has(m.league.code)) map.set(m.league.code, m.league);
+    return [...map.values()].sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      return a.name.localeCompare(b.name);
+    });
+  }, [data]);
+
   // -------- filtered datasets -------------------------------------------------
   const filteredMatches = useMemo(() => {
     if (!data) return [];
     return data.matches.filter((m) => {
       if (filters.source === "live" && m.source !== "live") return false;
-      const label = `${m.homeShort} ${m.homeName} ${m.awayShort} ${m.awayName}`;
+      if (filters.league !== "all" && m.league.code !== filters.league) return false;
+      const label = `${m.homeShort} ${m.homeName} ${m.awayShort} ${m.awayName} ${m.league.name}`;
       if (!matchesFilter(label, filters.query)) return false;
       return true;
     });
@@ -276,29 +307,37 @@ export default function Board() {
     return sg.simples.filter((b) => {
       if (filters.risk !== "all" && b.riskTier !== filters.risk) return false;
       if (filters.source === "live" && b.source !== "live") return false;
-      if (!matchesFilter(b.matchLabel + " " + b.selection, filters.query)) return false;
+      if (filters.league !== "all") {
+        const lg = leagueByMatch.get(b.matchId);
+        if (!lg || lg.code !== filters.league) return false;
+      }
+      const lgName = leagueByMatch.get(b.matchId)?.name ?? "";
+      if (!matchesFilter(`${b.matchLabel} ${b.selection} ${lgName}`, filters.query)) return false;
       return true;
     });
-  }, [sg, filters]);
+  }, [sg, filters, leagueByMatch]);
 
   const heroPicks = useMemo(() => {
     if (!sg) return [];
     // Best 6 picks with positive (or near-zero) edge — these are "destacades"
     return [...sg.simples]
       .sort((a, b) => {
-        // prefer live + low risk + decent edge
-        const sa = (a.source === "live" ? 0.05 : 0) + a.modelProb + a.edge * 0.5;
-        const sb = (b.source === "live" ? 0.05 : 0) + b.modelProb + b.edge * 0.5;
+        // prefer live + low risk + decent edge + tier-1 leagues
+        const tierA = leagueByMatch.get(a.matchId)?.tier ?? 9;
+        const tierB = leagueByMatch.get(b.matchId)?.tier ?? 9;
+        const sa = (a.source === "live" ? 0.05 : 0) + a.modelProb + a.edge * 0.5 - tierA * 0.01;
+        const sb = (b.source === "live" ? 0.05 : 0) + b.modelProb + b.edge * 0.5 - tierB * 0.01;
         return sb - sa;
       })
       .slice(0, 6);
-  }, [sg]);
+  }, [sg, leagueByMatch]);
 
   return (
     <Layout
       source={data?.source ?? null}
       liveCount={data?.liveMatchCount}
       totalCount={data?.totalMatchCount}
+      leagueCount={availableLeagues.length}
       bankroll={bankroll}
       onBankrollChange={setBankroll}
     >
@@ -333,7 +372,7 @@ export default function Board() {
           />
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {heroPicks.map((b, i) => (
-              <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} />
+              <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} />
             ))}
           </div>
         </section>
@@ -349,6 +388,7 @@ export default function Board() {
         shownMatches={filteredMatches.length}
         totalSimples={sg?.simples.length ?? 0}
         shownSimples={filteredSimples.length}
+        leagues={availableLeagues}
       />
 
       {/* ============== MATCHES ============== */}
@@ -398,7 +438,7 @@ export default function Board() {
               <div className="col-span-1 text-right">Guany</div>
               <div className="col-span-1 text-right">Risc</div>
             </div>
-            {filteredSimples.map((b, i) => <SimpleBetRow key={b.id} bet={b} index={i + 1} bankroll={bankroll} />)}
+            {filteredSimples.map((b, i) => <SimpleBetRow key={b.id} bet={b} index={i + 1} bankroll={bankroll} league={leagueByMatch.get(b.matchId) ?? null} />)}
           </div>
         )}
       </section>
@@ -460,11 +500,13 @@ function SectionHeader({ title, subtitle, icon }: { title: string; subtitle: str
 function FiltersBar({
   filters, onChange, edgeOnly, onToggleEdgeOnly,
   totalMatches, shownMatches, totalSimples, shownSimples,
+  leagues,
 }: {
   filters: Filters; onChange: (f: Filters) => void;
   edgeOnly: boolean; onToggleEdgeOnly: () => void;
   totalMatches: number; shownMatches: number;
   totalSimples: number; shownSimples: number;
+  leagues: League[];
 }) {
   const RISK_OPTIONS: { v: RiskFilter; label: string }[] = [
     { v: "all", label: "Tots" },
@@ -473,7 +515,7 @@ function FiltersBar({
     { v: "moderat", label: "Moderat" },
     { v: "alt", label: "Alt" },
   ];
-  const isFiltered = filters.risk !== "all" || filters.query !== "" || filters.source !== "all";
+  const isFiltered = filters.risk !== "all" || filters.query !== "" || filters.source !== "all" || filters.league !== "all";
   return (
     <div className="sticky top-16 z-10 -mx-4 md:-mx-8 px-4 md:px-8 py-3 mb-6 backdrop-blur-md bg-background/80 border-y border-border/60">
       <div className="flex flex-col lg:flex-row lg:items-center gap-3">
@@ -559,6 +601,49 @@ function FiltersBar({
         )}
       </div>
 
+      {/* League chips — second row */}
+      {leagues.length > 0 && (
+        <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 py-1 mt-2">
+          <span className="shrink-0 text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-semibold mr-1">Lligues</span>
+          <button
+            type="button"
+            onClick={() => onChange({ ...filters, league: "all" })}
+            className={
+              "shrink-0 text-[11px] uppercase tracking-[0.14em] px-2.5 py-1.5 rounded-md ring-1 ring-inset font-semibold transition-colors " +
+              (filters.league === "all"
+                ? "bg-primary/15 text-primary ring-primary/40"
+                : "bg-muted/20 text-muted-foreground ring-border/60 hover:text-foreground hover:bg-muted/40")
+            }
+          >
+            Totes
+            <span className="ml-1.5 font-mono text-[10px] text-muted-foreground/80">{leagues.length}</span>
+          </button>
+          {leagues.map((lg) => {
+            const active = filters.league === lg.code;
+            return (
+              <button
+                key={lg.code}
+                type="button"
+                onClick={() => onChange({ ...filters, league: active ? "all" : lg.code })}
+                className={
+                  "shrink-0 text-[11px] uppercase tracking-[0.14em] px-2.5 py-1.5 rounded-md ring-1 ring-inset font-semibold transition-colors flex items-center gap-1.5 " +
+                  (active
+                    ? "bg-primary/15 text-primary ring-primary/40"
+                    : "bg-muted/20 text-muted-foreground ring-border/60 hover:text-foreground hover:bg-muted/40")
+                }
+                title={`${lg.country} · ${lg.name}`}
+              >
+                <span
+                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: lg.color }}
+                />
+                {lg.shortName}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="flex items-center gap-4 mt-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground font-mono">
         <span>{shownMatches}/{totalMatches} partits</span>
         <span>{shownSimples}/{totalSimples} apostes simples</span>
@@ -567,13 +652,36 @@ function FiltersBar({
   );
 }
 
+function LeagueBadge({ league, compact = false }: { league: League; compact?: boolean }) {
+  return (
+    <span
+      className={
+        "inline-flex items-center gap-1.5 uppercase tracking-[0.14em] font-semibold rounded ring-1 ring-inset " +
+        (compact ? "text-[9px] px-1.5 py-0.5" : "text-[10px] px-2 py-0.5")
+      }
+      style={{
+        color: league.color,
+        backgroundColor: `${league.color}14`,
+        boxShadow: `inset 0 0 0 1px ${league.color}55`,
+      }}
+      title={`${league.country} · ${league.name}`}
+    >
+      <span
+        className="inline-block rounded-full shrink-0"
+        style={{ width: 6, height: 6, backgroundColor: league.color }}
+      />
+      {league.shortName}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Hero pick card
 // ---------------------------------------------------------------------------
 function HeroPickCard({
-  bet, bankroll, rank, matchById,
+  bet, bankroll, rank, matchById, league,
 }: {
-  bet: SimpleBet; bankroll: number; rank: number; matchById: BoardMatch[] | undefined;
+  bet: SimpleBet; bankroll: number; rank: number; matchById: BoardMatch[] | undefined; league: League | null;
 }) {
   const match = matchById?.find((m) => m.matchId === bet.matchId);
   const payout = bankroll * bet.odds;
@@ -585,10 +693,11 @@ function HeroPickCard({
       className="matte-card matte-card-hover rounded-xl p-4 flex flex-col gap-3 group relative overflow-hidden"
     >
       <div className="absolute top-0 right-0 w-24 h-24 rounded-full blur-3xl opacity-10 bg-primary -mr-6 -mt-6 pointer-events-none" />
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-mono">#{rank}</span>
           <RiskPill tier={bet.riskTier} compact />
+          {league && <LeagueBadge league={league} compact />}
         </div>
         <span className={
           "text-[10px] uppercase tracking-[0.18em] font-semibold flex items-center gap-1 " +
@@ -706,28 +815,31 @@ function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll:
   return (
     <div className="matte-card matte-card-hover rounded-xl overflow-hidden flex flex-col">
       {/* HEADER */}
-      <div className="px-4 py-3 flex items-center justify-between border-b border-border/60">
-        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+      <div className="px-4 py-3 flex items-center justify-between gap-2 border-b border-border/60 flex-wrap">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground min-w-0">
           {match.status === "live" ? (
             <>
               <span className="pulse-dot" />
               <span className="text-red-300 font-semibold">EN DIRECTE {match.minute ? `· ${match.minute}'` : ""}</span>
             </>
           ) : (
-            <><Clock className="w-3.5 h-3.5" /> {fmtKickoff(match.kickoff)}</>
+            <><Clock className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">{fmtKickoff(match.kickoff)}</span></>
           )}
         </div>
-        <span
-          className={
-            "text-[10px] uppercase tracking-[0.18em] px-2 py-0.5 rounded " +
-            (match.source === "live"
-              ? "bg-accent/10 text-accent ring-1 ring-inset ring-accent/30"
-              : "bg-primary/10 text-primary ring-1 ring-inset ring-primary/30")
-          }
-          title={match.bookmaker ? `Quotes reals via ${match.bookmaker}` : "Quotes derivades del model"}
-        >
-          {match.source === "live" ? `live · ${match.bookmaker ?? "draftkings"}` : "model"}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <LeagueBadge league={match.league} compact />
+          <span
+            className={
+              "text-[10px] uppercase tracking-[0.18em] px-2 py-0.5 rounded " +
+              (match.source === "live"
+                ? "bg-accent/10 text-accent ring-1 ring-inset ring-accent/30"
+                : "bg-primary/10 text-primary ring-1 ring-inset ring-primary/30")
+            }
+            title={match.bookmaker ? `Quotes reals via ${match.bookmaker}` : "Quotes derivades del model"}
+          >
+            {match.source === "live" ? `live · ${match.bookmaker ?? "draftkings"}` : "model"}
+          </span>
+        </div>
       </div>
 
       {/* TEAMS */}
@@ -922,15 +1034,18 @@ function MarketChip({ market }: { market: Market }) {
 // ---------------------------------------------------------------------------
 // Simple bet row
 // ---------------------------------------------------------------------------
-function SimpleBetRow({ bet, index, bankroll }: { bet: SimpleBet; index: number; bankroll: number }) {
+function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index: number; bankroll: number; league: League | null }) {
   const profit = bankroll * bet.odds - bankroll;
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-2 px-4 py-3 border-b border-border/40 last:border-b-0 hover:bg-white/[0.02] transition-colors">
       <div className="hidden md:flex md:col-span-1 items-center">
         <span className="text-xs font-mono text-muted-foreground">{String(index).padStart(2, "0")}</span>
       </div>
-      <div className="md:col-span-3 flex flex-col">
-        <span className="font-medium text-sm">{bet.matchLabel}</span>
+      <div className="md:col-span-3 flex flex-col min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-medium text-sm truncate">{bet.matchLabel}</span>
+          {league && <LeagueBadge league={league} compact />}
+        </div>
         <span className="text-[11px] text-muted-foreground flex items-center gap-1">
           {bet.status === "live" ? (
             <><span className="pulse-dot scale-75" /><span className="text-red-300">en directe</span></>

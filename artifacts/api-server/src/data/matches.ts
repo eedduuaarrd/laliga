@@ -4,6 +4,7 @@ import {
   type RawScoreboardEvent,
   type RawCompetitor,
 } from "../lib/espn.js";
+import { LEAGUES, getLeague, DEFAULT_LEAGUE, type League } from "../lib/leagues.js";
 import { teamFromRaw, type LiveTeam } from "./teams.js";
 
 export interface LiveMatch {
@@ -21,6 +22,10 @@ export interface LiveMatch {
   awayScore: number | null;
   venue: string;
   referee: string;
+  // League this match belongs to (carried through every downstream call so
+  // ESPN endpoints can be hit with the correct slug).
+  leagueCode: string;
+  league: League;
 }
 
 function inferStatus(ev: RawScoreboardEvent): { status: "live" | "upcoming" | "finished"; minute: number | null; detail: string } {
@@ -39,7 +44,7 @@ function pick(c: RawCompetitor[] | undefined, side: "home" | "away"): RawCompeti
   return (c ?? []).find((x) => x.homeAway === side);
 }
 
-function eventToMatch(ev: RawScoreboardEvent): LiveMatch | null {
+function eventToMatch(ev: RawScoreboardEvent, leagueCode: string): LiveMatch | null {
   const comp = ev.competitions?.[0];
   if (!comp) return null;
   const home = pick(comp.competitors, "home");
@@ -61,6 +66,8 @@ function eventToMatch(ev: RawScoreboardEvent): LiveMatch | null {
     awayScore: away.score != null ? Number(away.score) : null,
     venue: comp.venue?.fullName ?? "",
     referee: "", // referees come from summary endpoint, not scoreboard
+    leagueCode,
+    league: getLeague(leagueCode),
   };
 }
 
@@ -75,19 +82,48 @@ function daysAhead(from: Date, days: number): Date {
   return d;
 }
 
-// Default rolling window: last 14 days through next 30 days. La Liga matchdays
-// repeat weekly, so this almost always covers the next 4–5 fixtures plus the
-// last full matchday.
+// Default rolling window: last 14 days through next 30 days. Most leagues
+// run weekly, so this covers the next 4–5 fixtures plus the last full week.
 const PAST_DAYS = 14;
 const FUTURE_DAYS = 30;
 
 export async function getAllMatches(now: Date = new Date()): Promise<LiveMatch[]> {
-  const range = await getScoreboardRange(daysBack(now, PAST_DAYS), daysAhead(now, FUTURE_DAYS));
-  const out: LiveMatch[] = [];
-  for (const ev of range.events ?? []) {
-    const m = eventToMatch(ev);
-    if (m) out.push(m);
+  const start = daysBack(now, PAST_DAYS);
+  const end = daysAhead(now, FUTURE_DAYS);
+
+  // Pull every league in parallel; tolerate per-league failures so one bad
+  // endpoint doesn't blank out the whole board.
+  const perLeague = await Promise.all(
+    LEAGUES.map(async (lg) => {
+      try {
+        const range = await getScoreboardRange(start, end, lg.code);
+        const out: LiveMatch[] = [];
+        for (const ev of range.events ?? []) {
+          const m = eventToMatch(ev, lg.code);
+          if (m) out.push(m);
+        }
+        return out;
+      } catch {
+        return [] as LiveMatch[];
+      }
+    }),
+  );
+
+  // De-duplicate by event id (some UEFA events appear in both the
+  // continental and domestic feeds).
+  const byId = new Map<number, LiveMatch>();
+  for (const list of perLeague) {
+    for (const m of list) {
+      const existing = byId.get(m.id);
+      if (!existing) {
+        byId.set(m.id, m);
+        continue;
+      }
+      // Prefer the higher-tier league when conflicts arise.
+      if (m.league.tier < existing.league.tier) byId.set(m.id, m);
+    }
   }
+  const out = Array.from(byId.values());
   out.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
   return out;
 }
@@ -104,13 +140,48 @@ export async function getMatchesByGameweek(gw: number): Promise<LiveMatch[]> {
 }
 
 export async function getMatchById(id: number): Promise<LiveMatch | undefined> {
-  // Try the rolling window first
+  // Try the rolling window first.
   const all = await getAllMatches();
-  let m = all.find((x) => x.id === id);
+  const m = all.find((x) => x.id === id);
   if (m) return m;
-  // Fall back to the summary endpoint and synthesise enough to match.
+  // Fall back to the summary endpoint, trying each league until we hit one
+  // that returns a real payload.
+  for (const lg of LEAGUES) {
+    try {
+      const sum = await getEventSummary(id, lg.code);
+      const comp = sum.header?.competitions?.[0];
+      if (!comp) continue;
+      const home = pick(comp.competitors, "home");
+      const away = pick(comp.competitors, "away");
+      if (!home || !away) continue;
+      const stType = comp.status?.type;
+      const status: "live" | "upcoming" | "finished" =
+        stType?.completed ? "finished" : stType?.state === "in" ? "live" : "upcoming";
+      return {
+        id,
+        gameweek: 0,
+        kickoff: comp.date,
+        status,
+        statusDetail: stType?.shortDetail ?? "",
+        minute: stType?.state === "in" ? null : null,
+        homeTeamId: Number(home.team.id),
+        awayTeamId: Number(away.team.id),
+        homeTeam: teamFromRaw(home.team),
+        awayTeam: teamFromRaw(away.team),
+        homeScore: home.score != null ? Number(home.score) : null,
+        awayScore: away.score != null ? Number(away.score) : null,
+        venue: comp.venue?.fullName ?? "",
+        referee: sum.gameInfo?.officials?.find((o) => o.position?.name?.toLowerCase().includes("center"))?.fullName ?? "",
+        leagueCode: lg.code,
+        league: lg,
+      };
+    } catch {
+      // try next league
+    }
+  }
+  // Last-resort: use La Liga blind.
   try {
-    const sum = await getEventSummary(id);
+    const sum = await getEventSummary(id, DEFAULT_LEAGUE);
     const comp = sum.header?.competitions?.[0];
     if (!comp) return undefined;
     const home = pick(comp.competitors, "home");
@@ -125,7 +196,7 @@ export async function getMatchById(id: number): Promise<LiveMatch | undefined> {
       kickoff: comp.date,
       status,
       statusDetail: stType?.shortDetail ?? "",
-      minute: stType?.state === "in" ? null : null,
+      minute: null,
       homeTeamId: Number(home.team.id),
       awayTeamId: Number(away.team.id),
       homeTeam: teamFromRaw(home.team),
@@ -134,6 +205,8 @@ export async function getMatchById(id: number): Promise<LiveMatch | undefined> {
       awayScore: away.score != null ? Number(away.score) : null,
       venue: comp.venue?.fullName ?? "",
       referee: sum.gameInfo?.officials?.find((o) => o.position?.name?.toLowerCase().includes("center"))?.fullName ?? "",
+      leagueCode: DEFAULT_LEAGUE,
+      league: getLeague(DEFAULT_LEAGUE),
     };
   } catch {
     return undefined;
@@ -141,8 +214,6 @@ export async function getMatchById(id: number): Promise<LiveMatch | undefined> {
 }
 
 export async function getH2HMatches(homeTeamId: number, awayTeamId: number): Promise<LiveMatch[]> {
-  // ESPN's scoreboard window is small. Use the summary endpoint of the next
-  // scheduled meeting (if any); the summary has `headToHeadGames` going back years.
   const window = await getAllMatches();
   return window.filter(
     (m) =>
@@ -154,7 +225,6 @@ export async function getH2HMatches(homeTeamId: number, awayTeamId: number): Pro
 
 export async function getCurrentGameweek(): Promise<number> {
   const all = await getAllMatches();
-  // Choose the gameweek that has the most live or "today" matches; otherwise the next upcoming.
   const now = Date.now();
   const today = all.filter((m) => Math.abs(new Date(m.kickoff).getTime() - now) < 24 * 3600 * 1000);
   if (today.length) return today[0]!.gameweek || 1;

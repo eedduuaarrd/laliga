@@ -148,7 +148,7 @@ export interface MatchPrediction {
 export async function predictMatch(match: LiveMatch): Promise<{ prediction: MatchPrediction; poisson: PoissonResult; oddsRaw: RawOdds | null; summary: RawSummary | null }> {
   let summary: RawSummary | null = null;
   try {
-    summary = await getEventSummary(match.id);
+    summary = await getEventSummary(match.id, match.leagueCode);
   } catch {
     summary = null;
   }
@@ -429,7 +429,7 @@ export async function buildProbableLineup(match: LiveMatch, side: "home" | "away
   const teamId = side === "home" ? match.homeTeamId : match.awayTeamId;
   const team = side === "home" ? match.homeTeam : match.awayTeam;
   const formation = team.formation;
-  const squad = await getTeamSquad(teamId);
+  const squad = await getTeamSquad(teamId, match.leagueCode);
   const fit = squad.filter((p) => !p.injured);
   // Starting XI heuristic: top 1 GK + first N defenders + first N mids + first N forwards from roster order.
   const parts = formation.split("-").map(Number);

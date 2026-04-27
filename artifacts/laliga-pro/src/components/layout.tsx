@@ -5,13 +5,14 @@ interface LayoutProps {
   source?: string | null;
   liveCount?: number;
   totalCount?: number;
+  leagueCount?: number;
   bankroll?: number;
   onBankrollChange?: (n: number) => void;
 }
 
 const PRESETS = [10, 50, 100, 500];
 
-export function Layout({ children, source, liveCount, totalCount, bankroll, onBankrollChange }: LayoutProps) {
+export function Layout({ children, source, liveCount, totalCount, leagueCount, bankroll, onBankrollChange }: LayoutProps) {
   const hasLive = (liveCount ?? 0) > 0;
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
@@ -19,12 +20,14 @@ export function Layout({ children, source, liveCount, totalCount, bankroll, onBa
         <div className="max-w-[1400px] mx-auto px-4 md:px-8 h-16 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 rounded-md bg-primary text-primary-foreground font-black text-sm grid place-items-center tracking-tight shadow-sm shrink-0">
-              LE
+              FE
             </div>
             <div className="leading-tight min-w-0">
-              <div className="text-[15px] font-semibold tracking-tight truncate">La Liga Edge</div>
+              <div className="text-[15px] font-semibold tracking-tight truncate">Futbol Edge</div>
               <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground truncate">
-                Quotes en directe · model probabilístic
+                {leagueCount && leagueCount > 0
+                  ? `${leagueCount} lligues · quotes en directe · model probabilístic`
+                  : "Multi-lliga · quotes en directe · model probabilístic"}
               </div>
             </div>
           </div>
@@ -91,7 +94,7 @@ export function Layout({ children, source, liveCount, totalCount, bankroll, onBa
         {children}
       </main>
       <footer className="border-t border-border/60 mt-12 py-6 text-center text-[11px] text-muted-foreground tracking-wide">
-        Quotes reals via DraftKings (ESPN public API) · Model Poisson per a la resta de mercats · No és consell financer · Aposta amb responsabilitat
+        Quotes reals via DraftKings (ESPN public API) · Model Poisson multi-lliga · No és consell financer · Aposta amb responsabilitat
       </footer>
     </div>
   );

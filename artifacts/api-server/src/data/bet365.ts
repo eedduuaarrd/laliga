@@ -37,6 +37,16 @@ export interface BoardPlayerMarket {
   markets: BoardMarket[];
 }
 
+export interface BoardMatchLeague {
+  code: string;
+  name: string;
+  shortName: string;
+  country: string;
+  flag: string;
+  color: string;
+  tier: number;
+}
+
 export interface BoardMatch {
   matchId: number;
   status: "live" | "upcoming";
@@ -57,6 +67,7 @@ export interface BoardMatch {
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
   markets: BoardMarket[];
   playerMarkets: BoardPlayerMarket[];
+  league: BoardMatchLeague;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +173,7 @@ const PRIOR_RED_CARD       = 0.13;   // ~13% of LL matches see a red card
 // ---------------------------------------------------------------------------
 export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
   const { prediction, poisson, summary } = await predictMatch(m);
-  const live: LiveOddsSnapshot | null = await getLiveOddsForMatch(m.id).catch(() => null);
+  const live: LiveOddsSnapshot | null = await getLiveOddsForMatch(m.id, m.leagueCode).catch(() => null);
 
   const lambdaH = prediction.expectedHomeGoals;
   const lambdaA = prediction.expectedAwayGoals;
@@ -386,20 +397,52 @@ export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
     topPick: top,
     markets,
     playerMarkets,
+    league: {
+      code: m.league.code,
+      name: m.league.name,
+      shortName: m.league.shortName,
+      country: m.league.country,
+      flag: m.league.flag,
+      color: m.league.color,
+      tier: m.league.tier,
+    },
   };
 }
+
+// Cap matches per board pull. Each match triggers two ESPN summary calls; with
+// 12 leagues we'd otherwise be looking at hundreds of network round-trips.
+const MAX_BOARD_MATCHES = 36;
+const MAX_PER_LEAGUE = 6;
 
 export async function getBoard(): Promise<BoardMatch[]> {
   const all = await getMatchesByStatus("all");
   const now = Date.now();
-  const window = all
-    .filter((m) => {
-      if (m.status === "live") return true;
-      if (m.status !== "upcoming") return false;
-      const t = new Date(m.kickoff).getTime();
-      return t > now - 3600_000 && t < now + 10 * 24 * 3600_000;
-    })
-    .slice(0, 14);
+
+  // Live first, then upcoming within the next 10 days; never finished.
+  const candidates = all.filter((m) => {
+    if (m.status === "live") return true;
+    if (m.status !== "upcoming") return false;
+    const t = new Date(m.kickoff).getTime();
+    return t > now - 3600_000 && t < now + 10 * 24 * 3600_000;
+  });
+
+  // Bound how many matches per league we keep, prioritising tier-1 then
+  // chronological order. This guarantees league diversity even when one
+  // competition has dozens of fixtures in window (e.g. cup weekend).
+  candidates.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "live" ? -1 : 1;
+    if (a.league.tier !== b.league.tier) return a.league.tier - b.league.tier;
+    return a.kickoff.localeCompare(b.kickoff);
+  });
+  const perLeagueCount = new Map<string, number>();
+  const window: typeof candidates = [];
+  for (const m of candidates) {
+    const used = perLeagueCount.get(m.leagueCode) ?? 0;
+    if (used >= MAX_PER_LEAGUE) continue;
+    perLeagueCount.set(m.leagueCode, used + 1);
+    window.push(m);
+    if (window.length >= MAX_BOARD_MATCHES) break;
+  }
 
   const results = await Promise.all(
     window.map((m) => buildBoardMatch(m).catch(() => null)),
@@ -595,7 +638,7 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
   combos.sort((a, b) => b.combinedProb - a.combinedProb);
 
   return {
-    simples: simples.slice(0, 40),
+    simples: simples.slice(0, 60),
     combos,
   };
 }
