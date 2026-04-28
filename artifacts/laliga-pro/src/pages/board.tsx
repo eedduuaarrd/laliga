@@ -22,6 +22,9 @@ import {
   Star,
   Eye,
   EyeOff,
+  Lock,
+  Scale,
+  Rocket,
 } from "lucide-react";
 import { Layout } from "@/components/layout";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -62,6 +65,21 @@ interface League {
   color: string;
   tier: number;
 }
+interface MatchPick {
+  key: string;
+  group: string;
+  selection: string;
+  odds: number;
+  modelProb: number;
+  edge: number;
+  source: MarketSource;
+  valueScore: number;
+}
+interface MatchBestPicks {
+  safe: MatchPick | null;
+  value: MatchPick | null;
+  bold: MatchPick | null;
+}
 interface BoardMatch {
   matchId: number;
   status: "live" | "upcoming";
@@ -79,6 +97,7 @@ interface BoardMatch {
   bookmaker: string | null;
   oddsLastUpdate: string | null;
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
+  bestPicks: MatchBestPicks;
   markets: Market[];
   playerMarkets: PlayerMarket[];
   league: League;
@@ -319,14 +338,16 @@ export default function Board() {
 
   const heroPicks = useMemo(() => {
     if (!sg) return [];
-    // Best 6 picks with positive (or near-zero) edge — these are "destacades"
+    // Best 6 picks balancing safety + maximum odds (the user's explicit goal).
+    // Score = modelProb * odds (expected value) with small bonuses for live
+    // markets and tier-1 leagues, and a safety floor of ≥ 50% probability.
     return [...sg.simples]
+      .filter((b) => b.modelProb >= 0.50 && b.odds >= 1.40)
       .sort((a, b) => {
-        // prefer live + low risk + decent edge + tier-1 leagues
         const tierA = leagueByMatch.get(a.matchId)?.tier ?? 9;
         const tierB = leagueByMatch.get(b.matchId)?.tier ?? 9;
-        const sa = (a.source === "live" ? 0.05 : 0) + a.modelProb + a.edge * 0.5 - tierA * 0.01;
-        const sb = (b.source === "live" ? 0.05 : 0) + b.modelProb + b.edge * 0.5 - tierB * 0.01;
+        const sa = a.modelProb * a.odds + (a.source === "live" ? 0.04 : 0) - tierA * 0.005;
+        const sb = b.modelProb * b.odds + (b.source === "live" ? 0.04 : 0) - tierB * 0.005;
         return sb - sa;
       })
       .slice(0, 6);
@@ -366,8 +387,8 @@ export default function Board() {
       {heroPicks.length > 0 && (
         <section className="mb-8">
           <SectionHeader
-            title="Apostes destacades"
-            subtitle={`Les ${heroPicks.length} millors seleccions del moment combinant probabilitat, valor i fiabilitat de la quota.`}
+            title="Top apostes del dia"
+            subtitle={`Les ${heroPicks.length} apostes que millor combinen seguretat (≥50% de probabilitat) amb la quota més alta possible. Ordenades per valor esperat.`}
             icon={<Star className="w-5 h-5" />}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -652,6 +673,118 @@ function FiltersBar({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Best picks per match (3 strategic picks: safe / value / bold)
+// ---------------------------------------------------------------------------
+const PICK_FLAVORS = {
+  safe: {
+    label: "Segura",
+    sub: "Mín. risc",
+    color: "emerald",
+    icon: Lock,
+    accent: "text-emerald-300",
+    border: "border-emerald-500/40",
+    bgSoft: "bg-emerald-500/[0.07]",
+    bgRing: "ring-emerald-500/30",
+    chip: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
+    glow: "from-emerald-500/[0.1]",
+  },
+  value: {
+    label: "Valor",
+    sub: "Sweet spot",
+    color: "amber",
+    icon: Scale,
+    accent: "text-amber-300",
+    border: "border-amber-500/45",
+    bgSoft: "bg-amber-500/[0.08]",
+    bgRing: "ring-amber-500/35",
+    chip: "bg-amber-500/15 text-amber-300 ring-amber-500/35",
+    glow: "from-amber-500/[0.14]",
+  },
+  bold: {
+    label: "Atrevida",
+    sub: "Màx. quota",
+    color: "rose",
+    icon: Rocket,
+    accent: "text-rose-300",
+    border: "border-rose-500/40",
+    bgSoft: "bg-rose-500/[0.07]",
+    bgRing: "ring-rose-500/30",
+    chip: "bg-rose-500/15 text-rose-300 ring-rose-500/30",
+    glow: "from-rose-500/[0.1]",
+  },
+} as const;
+
+type PickFlavor = keyof typeof PICK_FLAVORS;
+
+function BestPicksBar({ bestPicks, bankroll }: { bestPicks: MatchBestPicks; bankroll: number }) {
+  const items: { flavor: PickFlavor; pick: MatchPick }[] = [];
+  if (bestPicks.safe) items.push({ flavor: "safe", pick: bestPicks.safe });
+  if (bestPicks.value) items.push({ flavor: "value", pick: bestPicks.value });
+  if (bestPicks.bold) items.push({ flavor: "bold", pick: bestPicks.bold });
+
+  if (items.length === 0) {
+    return (
+      <div className="px-4 py-3 border-y border-border/50 text-[11px] uppercase tracking-[0.16em] text-muted-foreground text-center">
+        Sense apostes prou fiables per a aquest partit
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-3 py-3 border-y border-border/50 bg-gradient-to-b from-white/[0.015] to-transparent">
+      <div className="flex items-center gap-1.5 mb-2 px-1">
+        <Sparkles className="w-3 h-3 text-primary" />
+        <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-semibold">
+          Millors apostes d'aquest partit
+        </span>
+      </div>
+      <div className={"grid gap-2 " + (items.length === 3 ? "grid-cols-3" : items.length === 2 ? "grid-cols-2" : "grid-cols-1")}>
+        {items.map(({ flavor, pick }) => (
+          <BestPickCard key={pick.key} flavor={flavor} pick={pick} bankroll={bankroll} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BestPickCard({ flavor, pick, bankroll }: { flavor: PickFlavor; pick: MatchPick; bankroll: number }) {
+  const f = PICK_FLAVORS[flavor];
+  const Icon = f.icon;
+  const profit = bankroll * pick.odds - bankroll;
+  return (
+    <div
+      className={
+        "relative overflow-hidden rounded-lg border " + f.border + " " + f.bgSoft +
+        " p-2.5 flex flex-col gap-1.5 transition-transform hover:-translate-y-0.5"
+      }
+    >
+      <div className={"absolute -top-6 -right-6 w-16 h-16 rounded-full blur-2xl bg-gradient-to-br " + f.glow + " to-transparent pointer-events-none"} />
+      <div className="flex items-center justify-between gap-1.5">
+        <span className={"inline-flex items-center gap-1 text-[9px] uppercase tracking-[0.16em] font-bold px-1.5 py-0.5 rounded ring-1 ring-inset " + f.chip}>
+          <Icon className="w-2.5 h-2.5" />
+          {f.label}
+        </span>
+        <span className={"font-mono text-[15px] font-bold tabular-nums " + f.accent}>
+          {pick.odds.toFixed(2)}
+        </span>
+      </div>
+      <div className="text-[11px] text-muted-foreground uppercase tracking-[0.12em] leading-tight">
+        {pick.group}
+      </div>
+      <div className="text-[12.5px] font-semibold leading-tight line-clamp-2 min-h-[2.4em]">
+        {pick.selection}
+      </div>
+      <div className="flex items-center justify-between text-[10px] font-mono pt-1 border-t border-border/40">
+        <span className="text-muted-foreground">
+          <span className={f.accent + " font-semibold"}>{pct(pick.modelProb)}</span> prob
+        </span>
+        <span className="text-accent font-semibold">+{eur(profit)}</span>
+      </div>
+    </div>
+  );
+}
+
 function LeagueBadge({ league, compact = false }: { league: League; compact?: boolean }) {
   return (
     <span
@@ -678,6 +811,21 @@ function LeagueBadge({ league, compact = false }: { league: League; compact?: bo
 // ---------------------------------------------------------------------------
 // Hero pick card
 // ---------------------------------------------------------------------------
+function ValueStars({ value }: { value: number }) {
+  // value = prob * odds. 1.0 = fair. We map [0.95..1.40+] to 1..5 stars.
+  const score = Math.max(1, Math.min(5, Math.round((value - 0.85) * 8)));
+  return (
+    <span className="inline-flex items-center gap-0.5" title={`Valor esperat ×${value.toFixed(2)}`}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <Star
+          key={i}
+          className={"w-2.5 h-2.5 " + (i <= score ? "fill-amber-300 text-amber-300" : "text-muted-foreground/30")}
+        />
+      ))}
+    </span>
+  );
+}
+
 function HeroPickCard({
   bet, bankroll, rank, matchById, league,
 }: {
@@ -686,16 +834,20 @@ function HeroPickCard({
   const match = matchById?.find((m) => m.matchId === bet.matchId);
   const payout = bankroll * bet.odds;
   const profit = payout - bankroll;
-  const s = RISK_STYLES[bet.riskTier] ?? RISK_STYLES["moderat"]!;
+  const valueScore = bet.modelProb * bet.odds;
   return (
     <a
       href="#matches"
       className="matte-card matte-card-hover rounded-xl p-4 flex flex-col gap-3 group relative overflow-hidden"
     >
-      <div className="absolute top-0 right-0 w-24 h-24 rounded-full blur-3xl opacity-10 bg-primary -mr-6 -mt-6 pointer-events-none" />
-      <div className="flex items-center justify-between gap-2 flex-wrap">
+      <div className="absolute top-0 right-0 w-32 h-32 rounded-full blur-3xl opacity-20 bg-primary -mr-10 -mt-10 pointer-events-none" />
+      <div className="absolute bottom-0 left-0 w-24 h-24 rounded-full blur-3xl opacity-10 bg-accent -ml-8 -mb-8 pointer-events-none" />
+
+      <div className="flex items-center justify-between gap-2 flex-wrap relative">
         <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-mono">#{rank}</span>
+          <span className="inline-grid place-items-center w-6 h-6 rounded-md bg-primary/15 ring-1 ring-primary/40 text-primary text-[11px] font-bold font-mono">
+            {rank}
+          </span>
           <RiskPill tier={bet.riskTier} compact />
           {league && <LeagueBadge league={league} compact />}
         </div>
@@ -708,38 +860,42 @@ function HeroPickCard({
         </span>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 relative">
         {match?.homeCrest && <img src={match.homeCrest} alt="" className="w-6 h-6 object-contain" />}
         <span className="text-sm font-semibold truncate">{bet.matchLabel}</span>
         {match?.awayCrest && <img src={match.awayCrest} alt="" className="w-6 h-6 object-contain ml-auto" />}
       </div>
 
-      <div>
-        <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{bet.market}</div>
+      <div className="relative">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{bet.market}</div>
+          <ValueStars value={valueScore} />
+        </div>
         <div className="text-base font-semibold mt-0.5 leading-tight">{bet.selection}</div>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/40">
+      <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border/40 relative">
         <div>
           <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Quota</div>
-          <div className="font-mono text-base font-semibold">{bet.odds.toFixed(2)}</div>
+          <div className="font-mono text-lg font-bold text-primary leading-tight">{bet.odds.toFixed(2)}</div>
         </div>
         <div>
           <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Prob.</div>
-          <div className={`font-mono text-base font-semibold ${s.color}`}>{pct(bet.modelProb)}</div>
+          <div className="font-mono text-lg font-bold text-emerald-300 leading-tight">{pct(bet.modelProb)}</div>
         </div>
         <div className="text-right">
           <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Guany</div>
-          <div className="font-mono text-base font-semibold text-accent">+{eur(profit)}</div>
+          <div className="font-mono text-lg font-bold text-accent leading-tight">+{eur(profit)}</div>
         </div>
       </div>
 
-      <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+      <div className="text-[10px] text-muted-foreground flex items-center gap-1 relative">
         {bet.status === "live" ? (
           <><span className="pulse-dot scale-75" /><span className="text-red-300">en directe</span></>
         ) : (
           <><Clock className="w-3 h-3" />{fmtKickoff(bet.kickoff)}</>
         )}
+        <span className="ml-auto text-muted-foreground/60">VE ×{valueScore.toFixed(2)}</span>
       </div>
     </a>
   );
@@ -861,22 +1017,8 @@ function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll:
         </div>
       </div>
 
-      {/* TOP PICK */}
-      {match.topPick && (
-        <div className="px-4 py-2 bg-primary/[0.04] border-y border-primary/15 flex items-center gap-2 text-sm flex-wrap">
-          <ShieldCheck className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-muted-foreground">Pic del model:</span>
-          <span className="font-semibold">{match.topPick.selection}</span>
-          <span className="ml-auto font-mono text-primary">
-            {pct(match.topPick.modelProb)} · {match.topPick.odds?.toFixed(2)}
-          </span>
-          {match.topPick.odds && (
-            <span className="font-mono text-[11px] text-accent border-l border-border/60 pl-2 ml-1">
-              +{eur(bankroll * match.topPick.odds - bankroll)} per {eur(bankroll)}
-            </span>
-          )}
-        </div>
-      )}
+      {/* BEST PICKS — 3 strategic picks per match */}
+      <BestPicksBar bestPicks={match.bestPicks} bankroll={bankroll} />
 
       {/* TABS */}
       <div className="border-b border-border/50 px-2 pt-2 flex items-center gap-1 overflow-x-auto">
@@ -1093,52 +1235,75 @@ function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index:
 function ComboCard({ combo, bankroll }: { combo: ComboBet; bankroll: number }) {
   const payout = bankroll * combo.combinedOdds;
   const profit = payout - bankroll;
+  const valueScore = combo.combinedProb * combo.combinedOdds;
   return (
-    <div className="matte-card matte-card-hover rounded-xl p-5 flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-3">
+    <div className="matte-card matte-card-hover rounded-xl p-5 flex flex-col gap-4 relative overflow-hidden">
+      <div className="absolute top-0 right-0 w-40 h-40 rounded-full blur-3xl opacity-15 bg-primary -mr-12 -mt-12 pointer-events-none" />
+      <div className="absolute bottom-0 left-0 w-32 h-32 rounded-full blur-3xl opacity-10 bg-accent -ml-10 -mb-10 pointer-events-none" />
+
+      <div className="flex items-start justify-between gap-3 relative">
         <div>
-          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground flex items-center gap-1.5">
+            <Layers className="w-3 h-3 text-primary" />
             Combinada · {combo.legs.length} cames
           </div>
-          <div className="text-base font-medium mt-1 max-w-md">{combo.rationale}</div>
+          <div className="text-sm font-medium mt-1.5 max-w-md text-foreground/90 leading-snug">{combo.rationale}</div>
         </div>
-        <RiskPill tier={combo.riskTier} />
+        <div className="flex flex-col items-end gap-1.5 shrink-0">
+          <RiskPill tier={combo.riskTier} />
+          <ValueStars value={valueScore} />
+        </div>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-1.5 relative">
         {combo.legs.map((leg, i) => (
-          <div key={i} className="flex items-center gap-3 text-sm border border-border/50 rounded-md px-3 py-2 bg-background/40">
-            <ChevronRight className="w-4 h-4 text-primary shrink-0" />
+          <div
+            key={i}
+            className="flex items-center gap-3 text-sm border border-border/40 rounded-md px-3 py-2 bg-black/20 hover:border-border/70 transition-colors"
+          >
+            <span className="inline-grid place-items-center w-5 h-5 rounded-full bg-primary/15 ring-1 ring-primary/30 text-primary text-[10px] font-bold font-mono">
+              {i + 1}
+            </span>
             <div className="min-w-0 flex-1">
               <div className="font-medium truncate flex items-center gap-1.5">
-                <span className={"inline-block w-1.5 h-1.5 rounded-full shrink-0 " + (leg.source === "live" ? "bg-accent" : "bg-primary/70")} />
-                {leg.matchLabel}
+                <span
+                  className={"inline-block w-1.5 h-1.5 rounded-full shrink-0 " + (leg.source === "live" ? "bg-accent" : "bg-primary/70")}
+                  title={leg.source === "live" ? "Quota real DraftKings" : "Quota model"}
+                />
+                <span className="truncate">{leg.matchLabel}</span>
               </div>
-              <div className="text-[11px] text-muted-foreground">{leg.market} · {leg.selection}</div>
+              <div className="text-[11px] text-muted-foreground truncate">{leg.market} · {leg.selection}</div>
             </div>
             <div className="text-right shrink-0">
-              <div className="font-mono font-semibold">{leg.odds.toFixed(2)}</div>
-              <div className="text-[10px] text-muted-foreground font-mono">{pct(leg.modelProb)}</div>
+              <div className="font-mono font-bold text-primary">{leg.odds.toFixed(2)}</div>
+              <div className="text-[10px] text-emerald-300/80 font-mono">{pct(leg.modelProb)}</div>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-4 gap-3 pt-3 border-t border-border/50">
-        <KV label="Quota total" value={combo.combinedOdds.toFixed(2)} accent="text-primary" />
-        <KV label="Probabilitat" value={pct(combo.combinedProb)} accent="text-foreground" />
-        <KV label={`Aposta ${eur(bankroll)}`} value={`→ ${eur(payout)}`} accent="text-foreground" />
-        <KV label="Guany net" value={`+${eur(profit)}`} accent="text-accent" />
+      <div className="relative grid grid-cols-2 gap-3 pt-3 border-t border-border/50">
+        <div className="rounded-lg bg-primary/[0.08] ring-1 ring-inset ring-primary/25 p-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Quota total</div>
+          <div className="font-mono text-2xl font-bold text-primary tabular-nums leading-none mt-1">
+            ×{combo.combinedOdds.toFixed(2)}
+          </div>
+          <div className="text-[10px] text-muted-foreground mt-1.5 font-mono">
+            Prob conjunta {pct(combo.combinedProb)}
+          </div>
+        </div>
+        <div className="rounded-lg bg-accent/[0.08] ring-1 ring-inset ring-accent/30 p-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Aposta {eur(bankroll)} →
+          </div>
+          <div className="font-mono text-2xl font-bold text-accent tabular-nums leading-none mt-1">
+            +{eur(profit)}
+          </div>
+          <div className="text-[10px] text-muted-foreground mt-1.5 font-mono">
+            Retorn total {eur(payout)}
+          </div>
+        </div>
       </div>
-    </div>
-  );
-}
-
-function KV({ label, value, accent }: { label: string; value: string; accent: string }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground truncate">{label}</div>
-      <div className={`font-mono text-base font-semibold ${accent}`}>{value}</div>
     </div>
   );
 }

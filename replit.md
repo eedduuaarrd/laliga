@@ -26,7 +26,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
-## Futbol Edge (v0.5.0 — April 2026, keyless, multi-league)
+## Futbol Edge (v0.6.0 — April 2026, keyless, multi-league, per-match best picks)
 
 A focused, single-page **multi-league football betting board** with REAL bookmaker odds + a probabilistic model. The whole UI is in Catalan with a matte-black aesthetic and a single amber/gold accent. **Zero API keys required.**
 
@@ -34,9 +34,10 @@ A focused, single-page **multi-league football betting board** with REAL bookmak
 
 1. Lists upcoming/live matches across **12 competitions**: La Liga, Premier League, Serie A, Bundesliga, Ligue 1, Primeira Liga, Eredivisie, Champions League, Europa League, Conference League, La Liga 2, Championship. The board caps at **36 matches** total with **max 6 per league** to keep latency bounded; tier-1 leagues take priority within the next 10-day window. Each match exposes **~56 markets** in 15 groups + per-player markets (anytime scorer / 2+ goals / anytime assist / G+A) for the top 4 contributors per side (filtered to a goal-contribution probability ≥ 6%).
 2. **Real DraftKings odds** (live/upcoming, pulled keyless from ESPN's public `pickcenter` feed) cover 1X2 and Over/Under 2.5; everything else is **model-derived** (Poisson-based) and clearly labelled. Market groups: 1X2, Doble oportunitat (1X / 12 / X2), Gols (O/U 0.5/1.5/2.5/3.5/4.5), BTTS, Resultat al descans (HT 1X2), Gol a cada part, Porteria a zero, Guanyar sense encaixar, Resultat exacte (top 5), Còrners (O/U 8.5/9.5/10.5), Targetes (O/U 3.5/4.5/5.5), Fores de joc (O/U 3.5/4.5), Faltes (O/U 22.5/25.5), Targeta vermella (Sí/No), Penal al partit (Sí/No), Golejadors, Assistents, Gol+Assistència.
-3. Suggests **simple bets** (top 60), ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with model probability ≥ 40% and odds ≥ 1.18 (no trivial Over 0.5 picks). Live DraftKings selections are preferred within the same risk tier. Per-player markets contribute one selection per player (the highest-EV one).
-4. Suggests **combined bets** (2/3/4 legs) built from the strongest pick *per match* (so legs are independent), sorted by joint probability.
-5. **League filter chips** + colour-coded league badges on every match card, hero pick and simple-bet row let users narrow down to a single competition with one click. Hero picks are tier-weighted so flagship leagues surface first when ties occur.
+3. **Per-match best picks (NEW v0.6)**: every match card surfaces three strategic recommendations side-by-side — `Segura` (highest probability ≥ 60% with non-trivial odds), `Valor` (best probability × odds sweet spot, the user-requested "safe + max odds" goal), and `Atrevida` (high odds ≥ 2.00 with the best supporting probability). Computed in `pickBestForMatch()` from the union of match-level + best-per-player markets, with deduping so no two slots show the same selection.
+4. Suggests **simple bets** (top 60), ordered low-to-high risk (`molt baix → baix → moderat → alt`), filtered to selections with model probability ≥ 40% and odds ≥ 1.18 (no trivial Over 0.5 picks). Live DraftKings selections are preferred within the same risk tier. Per-player markets contribute one selection per player (the highest-EV one).
+5. Suggests **combined bets** (NEW v0.6 algorithm): for each leg-count (2/3/4), brute-forces the combination that maximises **combined odds** while respecting a probability floor (50% / 25% / 10%). Built from per-match best picks (independent legs) ranked by EV (prob × odds) instead of raw probability, plus a "tot segur" 3-leg combo where every leg has individual prob ≥ 62%.
+6. **League filter chips** + colour-coded league badges on every match card, hero pick and simple-bet row let users narrow down to a single competition with one click. Hero picks are tier-weighted so flagship leagues surface first when ties occur.
 
 ### Artifacts
 

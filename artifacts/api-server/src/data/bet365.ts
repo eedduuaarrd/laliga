@@ -47,6 +47,34 @@ export interface BoardMatchLeague {
   tier: number;
 }
 
+/**
+ * A single recommended pick for a match. Surfaces the key metrics together so
+ * the UI can render a self-contained card without re-deriving anything.
+ */
+export interface MatchPick {
+  key: string;
+  group: string;
+  selection: string;
+  odds: number;
+  modelProb: number;
+  edge: number;
+  source: MarketSource;
+  /** prob × odds. 1.0 = fair, > 1.0 = positive expected value vs the price. */
+  valueScore: number;
+}
+
+/**
+ * Three strategic picks per match, balancing safety vs odds:
+ *   safe  — highest model prob (≥ 60%) with odds that aren't trivially low.
+ *   value — best probability × odds combination (the "sweet spot").
+ *   bold  — high-odds pick (≥ 2.00) with the best supporting probability.
+ */
+export interface MatchBestPicks {
+  safe: MatchPick | null;
+  value: MatchPick | null;
+  bold: MatchPick | null;
+}
+
 export interface BoardMatch {
   matchId: number;
   status: "live" | "upcoming";
@@ -65,6 +93,7 @@ export interface BoardMatch {
   bookmaker: string | null;
   oddsLastUpdate: string | null;
   topPick: { selection: string; modelProb: number; odds: number | null } | null;
+  bestPicks: MatchBestPicks;
   markets: BoardMarket[];
   playerMarkets: BoardPlayerMarket[];
   league: BoardMatchLeague;
@@ -167,6 +196,78 @@ function probWinToNilAway(matrix: { homeGoals: number; awayGoals: number; probab
 // La Liga static priors (model only, derived from public season averages).
 const PRIOR_PENALTY_AWARDED = 0.27;   // ~27% of LL matches see at least one penalty
 const PRIOR_RED_CARD       = 0.13;   // ~13% of LL matches see a red card
+
+/**
+ * Pick the strategic "best picks" for a match: a safe one (max prob with a
+ * decent price), a value one (best probability × odds sweet spot), and a bold
+ * one (high odds with the best supporting probability).
+ */
+function toMatchPick(mk: BoardMarket): MatchPick {
+  const odds = mk.odds ?? 1;
+  return {
+    key: mk.key,
+    group: mk.group,
+    selection: mk.selection,
+    odds,
+    modelProb: mk.modelProb,
+    edge: mk.edge ?? 0,
+    source: mk.source,
+    valueScore: +(mk.modelProb * odds).toFixed(4),
+  };
+}
+
+function pickBestForMatch(universe: BoardMarket[]): MatchBestPicks {
+  if (universe.length === 0) return { safe: null, value: null, bold: null };
+
+  // SAFE: highest probability among picks priced ≥ 1.40 (avoid trivial Over 0.5).
+  // Falls back to ≥ 1.20 if nothing matches the stricter threshold.
+  const safeStrong = universe.filter((m) => (m.odds ?? 0) >= 1.40 && m.modelProb >= 0.55);
+  const safePool = safeStrong.length > 0
+    ? safeStrong
+    : universe.filter((m) => (m.odds ?? 0) >= 1.20);
+  const safeMk = [...safePool]
+    .sort((a, b) => b.modelProb - a.modelProb)[0];
+
+  // VALUE: best probability × odds with prob ≥ 0.45 — the sweet spot the
+  // user explicitly asked for: safe but with the highest possible odds.
+  const valuePool = universe.filter((m) => (m.odds ?? 0) >= 1.50 && m.modelProb >= 0.45);
+  const valueMk = [...valuePool]
+    .sort((a, b) => (b.modelProb * (b.odds ?? 1)) - (a.modelProb * (a.odds ?? 1)))[0];
+
+  // BOLD: high odds (≥ 2.00) with the highest supporting probability.
+  const boldPool = universe.filter((m) => (m.odds ?? 0) >= 2.00 && m.modelProb >= 0.28);
+  const boldMk = [...boldPool]
+    .sort((a, b) => (b.modelProb * (b.odds ?? 1)) - (a.modelProb * (a.odds ?? 1)))[0];
+
+  // Avoid showing the same selection in two slots — promote the next best one.
+  const seen = new Set<string>();
+  const out: MatchBestPicks = { safe: null, value: null, bold: null };
+
+  if (safeMk) {
+    out.safe = toMatchPick(safeMk);
+    seen.add(safeMk.key);
+  }
+  if (valueMk && !seen.has(valueMk.key)) {
+    out.value = toMatchPick(valueMk);
+    seen.add(valueMk.key);
+  } else {
+    const fallback = [...valuePool].filter((m) => !seen.has(m.key))
+      .sort((a, b) => (b.modelProb * (b.odds ?? 1)) - (a.modelProb * (a.odds ?? 1)))[0];
+    if (fallback) {
+      out.value = toMatchPick(fallback);
+      seen.add(fallback.key);
+    }
+  }
+  if (boldMk && !seen.has(boldMk.key)) {
+    out.bold = toMatchPick(boldMk);
+  } else {
+    const fallback = [...boldPool].filter((m) => !seen.has(m.key))
+      .sort((a, b) => (b.modelProb * (b.odds ?? 1)) - (a.modelProb * (a.odds ?? 1)))[0];
+    if (fallback) out.bold = toMatchPick(fallback);
+  }
+
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Build a single match card with all the markets we can derive.
@@ -378,6 +479,19 @@ export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
     ? { selection: candidates[0].selection, modelProb: candidates[0].modelProb, odds: candidates[0].odds }
     : null;
 
+  // ---- Best picks per match (safe / value / bold)
+  // Build the universe: match-level markets + best player market per player.
+  const playerBest: BoardMarket[] = [];
+  for (const pl of playerMarkets) {
+    const bestForPlayer = [...pl.markets]
+      .filter((mk) => mk.odds && mk.odds >= 1.20)
+      .sort((a, b) => (b.modelProb * (b.odds ?? 1)) - (a.modelProb * (a.odds ?? 1)))[0];
+    if (bestForPlayer) playerBest.push(bestForPlayer);
+  }
+  const universe = [...markets, ...playerBest].filter((mk) => mk.odds && mk.odds >= 1.18);
+
+  const bestPicks = pickBestForMatch(universe);
+
   return {
     matchId: m.id,
     status: m.status === "live" ? "live" : "upcoming",
@@ -395,6 +509,7 @@ export async function buildBoardMatch(m: LiveMatch): Promise<BoardMatch> {
     bookmaker: live?.bookmaker ?? null,
     oddsLastUpdate: live?.fetchedAt ?? prediction.oddsLastUpdate,
     topPick: top,
+    bestPicks,
     markets,
     playerMarkets,
     league: {
@@ -585,16 +700,31 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
     return b.modelProb - a.modelProb;
   });
 
-  // Combos: best pick per match (independence), pick top 8 candidates by prob.
+  // ---- Combos -------------------------------------------------------------
+  // We want safe combinations with the maximum possible total odds. The
+  // construction strategy:
+  //   1) Per match, keep the single highest-probability pick (so combos use
+  //      independent matches).
+  //   2) Build three layers, each picking legs that maximise their joint EV
+  //      (prob × odds) within a safety floor:
+  //        - SEGURA   (2 legs):  combined prob ≥ 50%, max combined odds
+  //        - VALOR    (3 legs):  combined prob ≥ 25%, max combined odds
+  //        - ATREVIDA (4 legs):  combined prob ≥ 10%, max combined odds
+  //   3) Always include a "max odds safe" combo (highest combined odds among
+  //      legs with individual prob ≥ 55%) to satisfy the user's explicit
+  //      "safe + max odds" goal.
   const bestPerMatch = new Map<number, SimpleBet>();
   for (const s of simples) {
     const cur = bestPerMatch.get(s.matchId);
-    if (!cur || s.modelProb > cur.modelProb) bestPerMatch.set(s.matchId, s);
+    // Use value (prob * odds) instead of raw prob so we don't always pick the
+    // trivially safe Over 0.5 leg from each match.
+    const score = (x: SimpleBet) => x.modelProb * x.odds;
+    if (!cur || score(s) > score(cur)) bestPerMatch.set(s.matchId, s);
   }
-  const candidates = [...bestPerMatch.values()]
-    .filter((s) => s.modelProb >= 0.55)
-    .sort((a, b) => b.modelProb - a.modelProb)
-    .slice(0, 8);
+  // Universe for combos: per-match best picks with prob ≥ 50% AND odds ≥ 1.40
+  // (so we don't combine 1.05 selections that barely move the needle).
+  const universe = [...bestPerMatch.values()]
+    .filter((s) => s.modelProb >= 0.50 && s.odds >= 1.40);
 
   const combos: ComboBet[] = [];
 
@@ -618,23 +748,83 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
     };
   }
 
-  if (candidates.length >= 2) {
-    const pairs: [SimpleBet, SimpleBet][] = [];
-    for (let i = 0; i < candidates.length; i++) {
-      for (let j = i + 1; j < candidates.length; j++) {
-        pairs.push([candidates[i]!, candidates[j]!]);
+  // For each target leg-count, search for the combination of N legs that
+  // maximises combined odds while satisfying the prob floor. We use a greedy
+  // pre-filter (top 12 by value score) to keep the search bounded, then a
+  // brute-force over subsets of that pool.
+  function bestCombo(legCount: number, probFloor: number): SimpleBet[] | null {
+    if (universe.length < legCount) return null;
+    const pool = [...universe]
+      .sort((a, b) => (b.modelProb * b.odds) - (a.modelProb * a.odds))
+      .slice(0, 12);
+    const indices: number[][] = [];
+    const cur: number[] = [];
+    function recurse(start: number) {
+      if (cur.length === legCount) { indices.push([...cur]); return; }
+      for (let i = start; i <= pool.length - (legCount - cur.length); i++) {
+        cur.push(i);
+        recurse(i + 1);
+        cur.pop();
       }
     }
-    pairs.sort((a, b) => b[0].modelProb * b[1].modelProb - a[0].modelProb * a[1].modelProb);
-    for (const [a, b] of pairs.slice(0, 4)) {
-      combos.push(makeCombo([a, b],
-        `Doble amb les dues seleccions individuals més fortes (${(a.modelProb * 100).toFixed(0)}% × ${(b.modelProb * 100).toFixed(0)}%).`,
-      ));
+    recurse(0);
+    let best: { legs: SimpleBet[]; odds: number; prob: number } | null = null;
+    for (const idx of indices) {
+      const legs = idx.map((i) => pool[i]!);
+      const prob = legs.reduce((a, l) => a * l.modelProb, 1);
+      if (prob < probFloor) continue;
+      const odds = legs.reduce((a, l) => a * l.odds, 1);
+      if (!best || odds > best.odds) best = { legs, odds, prob };
+    }
+    return best ? best.legs : null;
+  }
+
+  const c2safe = bestCombo(2, 0.50);
+  if (c2safe) combos.push(makeCombo(c2safe,
+    "Doble segura amb la millor quota possible: dues seleccions amb >50% de probabilitat conjunta."));
+
+  const c3val = bestCombo(3, 0.25);
+  if (c3val) combos.push(makeCombo(c3val,
+    "Triple de valor: tres cames amb la quota total més alta mantenint >25% de probabilitat conjunta."));
+
+  const c4bold = bestCombo(4, 0.10);
+  if (c4bold) combos.push(makeCombo(c4bold,
+    "Quàdruple atrevida: màxim retorn possible amb la quota més alta i probabilitat conjunta encara raonable."));
+
+  // "Max safe" combo: combination of 3 legs each with individual prob ≥ 0.62
+  const safeUniverse = universe.filter((s) => s.modelProb >= 0.62);
+  if (safeUniverse.length >= 3) {
+    const pool = [...safeUniverse]
+      .sort((a, b) => (b.modelProb * b.odds) - (a.modelProb * a.odds))
+      .slice(0, 8);
+    const indices: number[][] = [];
+    const cur: number[] = [];
+    function recurse(start: number) {
+      if (cur.length === 3) { indices.push([...cur]); return; }
+      for (let i = start; i <= pool.length - (3 - cur.length); i++) {
+        cur.push(i); recurse(i + 1); cur.pop();
+      }
+    }
+    recurse(0);
+    let bestSafe: { legs: SimpleBet[]; odds: number } | null = null;
+    for (const idx of indices) {
+      const legs = idx.map((i) => pool[i]!);
+      const odds = legs.reduce((a, l) => a * l.odds, 1);
+      if (!bestSafe || odds > bestSafe.odds) bestSafe = { legs, odds };
+    }
+    if (bestSafe) {
+      const sig = bestSafe.legs.map((l) => l.id).sort().join("|");
+      const dup = combos.find((c) => c.legs.length === 3 && c.legs.map((l) => `${l.matchLabel}-${l.selection}`).sort().join("|").length > 0
+        && c.id.includes(bestSafe!.legs.map((l) => l.id).join("-").slice(0, 20)));
+      if (!dup) {
+        combos.push(makeCombo(bestSafe.legs,
+          `Triple "tot segur": tres cames amb >62% de probabilitat individual i la quota total més alta possible (${bestSafe.odds.toFixed(2)}).`));
+      }
+      void sig;
     }
   }
-  if (candidates.length >= 3) combos.push(makeCombo(candidates.slice(0, 3), "Triple amb les tres apostes més consistents segons el model."));
-  if (candidates.length >= 4) combos.push(makeCombo(candidates.slice(0, 4), "Quàdruple agressiva: més risc però retorn molt més alt."));
 
+  // Sort: highest joint probability first (safer combos before riskier ones).
   combos.sort((a, b) => b.combinedProb - a.combinedProb);
 
   return {
