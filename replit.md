@@ -26,9 +26,19 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
-## Futbol Edge (v0.7.0 — April 2026, Kelly + confidence + bet slip + Aposta del dia)
+## Futbol Edge (v0.7.1 — April 2026, value-first proposals + podium UI)
 
-### v0.7.0 changelog (current)
+### v0.7.1 changelog (current)
+
+- **Backend** (`bet365.ts`): tightened the proposal floors to honour the user's "very probable AND maximum odds" goal — `MIN_PROB_FOR_SUGGESTION = 0.45`, `MIN_ODDS_FOR_SUGGESTION = 1.30` (player props at ≥1.55), eliminating noise like 1.05 Over 0.5 picks. Added a `valueScore = prob × odds + small bonuses (DK live, edge, sweet-spot 1.55-2.50 odds band)` field on every `SimpleBet` and a `qualityTier` enum (`joia | valor | segur | edge | estandard`) — "joia" = ≥65% prob AND ≥1.80 odds (the unicorn pick), "valor" = ≥55% prob AND ≥1.55 odds (sweet spot). Simples are now **sorted by `valueScore` first** (replaces the previous risk-tier-first sort) and de-duplicated to max 2 picks per match. Combos tightened: every leg must be ≥55% prob AND ≥1.50 odds.
+- **Frontend** (`board.tsx`):
+  - **Podium top-picks**: the "Top apostes del dia" section now renders a 3-column podium for the top 3 picks (ranks #1-#3) followed by an optional secondary 6-pick grid (#4-#9). Diversity cap of 2 per `market::selection` signature stops the same "Under 10.5 Còrners" pick from filling all 9 slots.
+  - **Quality badges** (`QualityBadge`): new component with Catalan labels (`Joia / Valor / Segura / Edge + / Estàndard`), each with its own colour — fuchsia for joia, amber for valor, emerald for segura, cyan for edge. Surfaced on the Aposta del dia hero, every Hero pick card, and as the "Tipus" column in the simples table (replacing the previous `Risc` column there; `RiskPill` is still used inside match cards).
+  - **VE column + sort picker**: the simples table now shows the value-expected metric (×prob × quota) instead of raw edge %, and a new `SortPicker` lets the user re-order by `Valor (default) / Probabilitat / Quota / Edge`.
+  - Hero picks selection lowered to no minimum prob/odds (relies on tightened backend floors) and uses the backend `valueScore` directly.
+- **Vite proxy fix** (carry-over from v0.7.0 setup): `/api` requests proxied to `http://localhost:8080` so the frontend talks to the API server in dev.
+
+### v0.7.0 changelog
 
 - **Backend** (`predictions.ts`): added `extractH2HSignal()` from ESPN summary `headToHeadGames` (last 6); `predictMatch()` now blends 65% book + 25% rates + 10% H2H when ≥3 H2H games exist (or 70/30 rates/H2H without book). Player props denominator changed from /1.0 to /0.70 (more realistic season fraction); `SHARE_CAP=0.42` so no single striker monopolises team xG.
 - **Backend** (`bet365.ts`): added `kellyFraction(p,odds,cap=0.05)` (¼-Kelly capped at 5%) and `confidenceScore()` (model agreement with book + edge bonus + sweet-spot bonus + DK-live boost). Both attached to every `MatchPick`, `SimpleBet`, and `ComboBet.legs[].matchId` for combo independence enforcement.

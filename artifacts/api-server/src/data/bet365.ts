@@ -633,6 +633,17 @@ export interface SimpleBet {
   kellyFraction: number;
   /** Composite confidence 0..1. */
   confidence: number;
+  /** prob × odds (>1.0 = +EV vs the price). The user-facing "value" metric. */
+  valueScore: number;
+  /**
+   * Quality tier that combines safety AND odds:
+   *   "joia"  — prob ≥ 65% AND odds ≥ 1.80 (very rare unicorn picks)
+   *   "valor" — prob ≥ 55% AND odds ≥ 1.55 (sweet spot: safe + good odds)
+   *   "segur" — prob ≥ 65% (high probability, lower odds)
+   *   "edge"  — positive edge ≥ +5% (model says undervalued)
+   *   "estandard" — everything else that passes the floor
+   */
+  qualityTier: "joia" | "valor" | "segur" | "edge" | "estandard";
 }
 
 export interface ComboBet {
@@ -661,6 +672,19 @@ function tierForProb(p: number): SimpleBet["riskTier"] {
   return "alt";
 }
 
+/**
+ * Quality tier — combines probability and odds to express what kind of pick
+ * this is. The user explicitly asked for "very probable picks with the highest
+ * possible odds", so "joia" (>=65% prob AND >=1.80 odds) is the headline tier.
+ */
+function qualityTierFor(prob: number, odds: number, edge: number): SimpleBet["qualityTier"] {
+  if (prob >= 0.65 && odds >= 1.80) return "joia";
+  if (prob >= 0.55 && odds >= 1.55) return "valor";
+  if (prob >= 0.65) return "segur";
+  if (edge >= 0.05) return "edge";
+  return "estandard";
+}
+
 function tierForCombo(p: number): ComboBet["riskTier"] {
   if (p >= 0.55) return "baix";
   if (p >= 0.32) return "moderat";
@@ -677,9 +701,28 @@ function rationaleFor(modelProb: number, edge: number, source: MarketSource): st
   return "Aposta més arriscada però amb valor esperat positiu.";
 }
 
-// Avoid trivial low-odds picks like Over 0.5 (odds ~1.05) where the unit win
-// is negligible. Anything below 1.18 is filtered out of suggestions.
-const MIN_ODDS_FOR_SUGGESTION = 1.18;
+// Avoid trivial low-odds picks. We tightened the floors to satisfy the user's
+// explicit request for "very probable picks with the highest possible odds":
+//   - odds ≥ 1.30 (no more 1.05 Over 0.5 noise)
+//   - prob ≥ 45% (anything lower isn't actually "molt probable")
+const MIN_ODDS_FOR_SUGGESTION = 1.30;
+const MIN_PROB_FOR_SUGGESTION = 0.45;
+
+/**
+ * Composite score used to rank simples. The user wants picks that are
+ * **simultaneously safe and high-odds**, so the dominant term is prob × odds
+ * (expected value per unit stake). We add small bonuses for real DK lines
+ * (more trustworthy than model) and a moderate edge bonus.
+ */
+function valueScoreFor(prob: number, odds: number, edge: number, source: MarketSource): number {
+  const ve = prob * odds;                                      // base EV (>1 = +EV)
+  const liveBonus = source === "live" ? 0.04 : 0;              // trust real DK lines
+  const edgeBonus = Math.max(0, Math.min(0.20, edge * 1.5));   // cap edge influence
+  // Sweet-spot bonus: encourage picks in the 1.55-2.50 odds band — that's
+  // where "safe + high odds" actually lives.
+  const oddsBand = odds >= 1.55 && odds <= 2.50 ? 0.03 : 0;
+  return +(ve + liveBonus + edgeBonus + oddsBand).toFixed(4);
+}
 
 export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos: ComboBet[] }> {
   const board = await getBoard();
@@ -691,7 +734,7 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
     // Match-level markets
     for (const mk of m.markets) {
       if (!mk.odds || mk.odds < MIN_ODDS_FOR_SUGGESTION) continue;
-      if (mk.modelProb < 0.40) continue;
+      if (mk.modelProb < MIN_PROB_FOR_SUGGESTION) continue;
       const edge = mk.edge ?? 0;
       if (edge < -0.10) continue;
       simples.push({
@@ -711,13 +754,17 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         rationale: rationaleFor(mk.modelProb, edge, mk.source),
         kellyFraction: kellyFraction(mk.modelProb, mk.odds),
         confidence: confidenceScore(mk),
+        valueScore: valueScoreFor(mk.modelProb, mk.odds, edge, mk.source),
+        qualityTier: qualityTierFor(mk.modelProb, mk.odds, edge),
       });
     }
 
-    // Player markets (only the strongest pick per player to avoid noise)
+    // Player markets (only the strongest pick per player to avoid noise).
+    // For player props we keep prob ≥ 0.32 (forwards rarely score >50% solo)
+    // but raise the odds floor to 1.55 since these are inherently higher odds.
     for (const pl of m.playerMarkets) {
       const best = [...pl.markets]
-        .filter((mk) => mk.odds && mk.odds >= MIN_ODDS_FOR_SUGGESTION && mk.modelProb >= 0.30)
+        .filter((mk) => mk.odds && mk.odds >= 1.55 && mk.modelProb >= 0.32)
         .sort((a, b) => b.modelProb * (b.odds ?? 1) - a.modelProb * (a.odds ?? 1))[0];
       if (!best) continue;
       simples.push({
@@ -737,19 +784,37 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         rationale: `${pl.teamShort} · ${pl.positionLabel} · ${pl.seasonGoals}G ${pl.seasonAssists}A aquesta temporada.`,
         kellyFraction: kellyFraction(best.modelProb, best.odds!),
         confidence: confidenceScore(best),
+        valueScore: valueScoreFor(best.modelProb, best.odds!, best.edge ?? 0, best.source),
+        qualityTier: qualityTierFor(best.modelProb, best.odds!, best.edge ?? 0),
       });
     }
   }
 
-  // Sort: lowest risk first; within tier, prefer real DraftKings then higher edge then higher prob.
-  const tierOrder = { "molt baix": 0, baix: 1, moderat: 2, alt: 3 } as const;
+  // Default sort: VALUE first (the user's explicit ask = high prob × high odds).
+  // Ties resolved by quality tier and then by raw probability.
+  const qualityOrder = { joia: 0, valor: 1, segur: 2, edge: 3, estandard: 4 } as const;
   simples.sort((a, b) => {
-    if (tierOrder[a.riskTier] !== tierOrder[b.riskTier])
-      return tierOrder[a.riskTier] - tierOrder[b.riskTier];
+    if (Math.abs(b.valueScore - a.valueScore) > 0.005) return b.valueScore - a.valueScore;
+    if (qualityOrder[a.qualityTier] !== qualityOrder[b.qualityTier])
+      return qualityOrder[a.qualityTier] - qualityOrder[b.qualityTier];
     if (a.source !== b.source) return a.source === "live" ? -1 : 1;
-    if (Math.abs(b.edge - a.edge) > 0.02) return b.edge - a.edge;
     return b.modelProb - a.modelProb;
   });
+
+  // De-duplicate near-identical picks per match (e.g. don't surface both
+  // "Doble oportunitat 1X" and "Doble oportunitat X2" — keep only the best one
+  // per match in the headline list, but allow up to 2 different markets).
+  const perMatchCount = new Map<number, number>();
+  const dedup: SimpleBet[] = [];
+  for (const s of simples) {
+    const c = perMatchCount.get(s.matchId) ?? 0;
+    if (c >= 2) continue;
+    perMatchCount.set(s.matchId, c + 1);
+    dedup.push(s);
+  }
+  // Replace
+  simples.length = 0;
+  simples.push(...dedup);
 
   // ---- Combos -------------------------------------------------------------
   // We want safe combinations with the maximum possible total odds. The
@@ -772,10 +837,11 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
     const score = (x: SimpleBet) => x.modelProb * x.odds;
     if (!cur || score(s) > score(cur)) bestPerMatch.set(s.matchId, s);
   }
-  // Universe for combos: per-match best picks with prob ≥ 50% AND odds ≥ 1.40
-  // (so we don't combine 1.05 selections that barely move the needle).
+  // Universe for combos: per-match best picks with prob ≥ 55% AND odds ≥ 1.50
+  // — combos must compound real value, not 1.10 trivial picks. The user
+  // explicitly asked for "very probable picks with the highest possible odds".
   const universe = [...bestPerMatch.values()]
-    .filter((s) => s.modelProb >= 0.50 && s.odds >= 1.40);
+    .filter((s) => s.modelProb >= 0.55 && s.odds >= 1.50);
 
   const combos: ComboBet[] = [];
 

@@ -118,6 +118,8 @@ interface BoardResponse {
   matches: BoardMatch[];
 }
 
+type QualityTier = "joia" | "valor" | "segur" | "edge" | "estandard";
+
 interface SimpleBet {
   id: string;
   matchId: number;
@@ -135,6 +137,8 @@ interface SimpleBet {
   rationale: string;
   kellyFraction: number;
   confidence: number;
+  valueScore: number;
+  qualityTier: QualityTier;
 }
 interface ComboBet {
   id: string;
@@ -280,6 +284,67 @@ function RiskPill({ tier, compact = false }: { tier: string; compact?: boolean }
   );
 }
 
+// Quality tier — captures "what kind of pick is this?". The user explicitly
+// wants to find the unicorn: very probable AND high odds (= "joia").
+const QUALITY_STYLES: Record<QualityTier, { label: string; color: string; bg: string; ring: string; dot: string; icon: typeof Crown }> = {
+  joia:      { label: "Joia",       color: "text-fuchsia-300", bg: "bg-fuchsia-500/10", ring: "ring-fuchsia-500/40", dot: "bg-fuchsia-400", icon: Crown },
+  valor:     { label: "Valor",      color: "text-amber-300",   bg: "bg-amber-500/10",   ring: "ring-amber-500/40",   dot: "bg-amber-400",   icon: Star },
+  segur:     { label: "Segura",     color: "text-emerald-300", bg: "bg-emerald-500/10", ring: "ring-emerald-500/40", dot: "bg-emerald-400", icon: Lock },
+  edge:      { label: "Edge +",     color: "text-cyan-300",    bg: "bg-cyan-500/10",    ring: "ring-cyan-500/40",    dot: "bg-cyan-400",    icon: TrendingUp },
+  estandard: { label: "Estàndard",  color: "text-slate-300",   bg: "bg-slate-500/10",   ring: "ring-slate-500/40",   dot: "bg-slate-400",   icon: ShieldCheck },
+};
+
+function SortPicker({ value, onChange }: { value: SimplesSort; onChange: (s: SimplesSort) => void }) {
+  const opts: { v: SimplesSort; label: string; hint: string }[] = [
+    { v: "value", label: "Valor",  hint: "prob × quota" },
+    { v: "prob",  label: "Prob.",  hint: "més probable" },
+    { v: "odds",  label: "Quota",  hint: "quota més alta" },
+    { v: "edge",  label: "Edge",   hint: "infravalorades" },
+  ];
+  return (
+    <div className="inline-flex items-center gap-1 rounded-lg bg-black/30 ring-1 ring-inset ring-border/60 p-1">
+      <span className="px-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Ordena per</span>
+      {opts.map((o) => {
+        const active = value === o.v;
+        return (
+          <button
+            key={o.v}
+            type="button"
+            onClick={() => onChange(o.v)}
+            title={o.hint}
+            className={
+              "text-[11px] uppercase tracking-[0.14em] font-semibold px-2.5 py-1 rounded-md transition-colors " +
+              (active
+                ? "bg-primary text-black"
+                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.04]")
+            }
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function QualityBadge({ tier, compact = false }: { tier: QualityTier; compact?: boolean }) {
+  const s = QUALITY_STYLES[tier];
+  const Icon = s.icon;
+  return (
+    <span
+      className={
+        "inline-flex items-center gap-1 uppercase tracking-[0.16em] font-bold rounded ring-1 ring-inset " +
+        s.bg + " " + s.color + " " + s.ring + " " +
+        (compact ? "text-[9px] px-1.5 py-0.5" : "text-[10px] px-2 py-1")
+      }
+      title={tier === "joia" ? "Joia: probabilitat alta i quota alta — el que estàs buscant" : tier === "valor" ? "Valor: probabilitat sòlida amb quota destacada" : tier === "segur" ? "Segura: probabilitat molt alta" : tier === "edge" ? "Edge positiu: el mercat infravalora" : "Pick estàndard"}
+    >
+      <Icon className={compact ? "w-2.5 h-2.5" : "w-3 h-3"} />
+      {s.label}
+    </span>
+  );
+}
+
 function fmtKickoff(iso: string): string {
   try {
     const d = new Date(iso);
@@ -310,13 +375,15 @@ function eur(n: number): string {
 // ---------------------------------------------------------------------------
 type RiskFilter = "all" | "molt baix" | "baix" | "moderat" | "alt";
 type SourceFilter = "all" | "live";
+type SimplesSort = "value" | "prob" | "odds" | "edge";
 interface Filters {
   risk: RiskFilter;
   query: string;
   source: SourceFilter;
   league: string; // "all" or league code
+  sort: SimplesSort;
 }
-const DEFAULT_FILTERS: Filters = { risk: "all", query: "", source: "all", league: "all" };
+const DEFAULT_FILTERS: Filters = { risk: "all", query: "", source: "all", league: "all", sort: "value" };
 
 function matchesFilter(label: string, q: string): boolean {
   if (!q) return true;
@@ -388,7 +455,7 @@ export default function Board() {
 
   const filteredSimples = useMemo(() => {
     if (!sg) return [];
-    return sg.simples.filter((b) => {
+    const filtered = sg.simples.filter((b) => {
       if (filters.risk !== "all" && b.riskTier !== filters.risk) return false;
       if (filters.source === "live" && b.source !== "live") return false;
       if (filters.league !== "all") {
@@ -399,36 +466,46 @@ export default function Board() {
       if (!matchesFilter(`${b.matchLabel} ${b.selection} ${lgName}`, filters.query)) return false;
       return true;
     });
+    const cmp: Record<SimplesSort, (a: SimpleBet, b: SimpleBet) => number> = {
+      value: (a, b) => b.valueScore - a.valueScore,
+      prob:  (a, b) => b.modelProb  - a.modelProb,
+      odds:  (a, b) => b.odds       - a.odds,
+      edge:  (a, b) => b.edge       - a.edge,
+    };
+    return [...filtered].sort(cmp[filters.sort]);
   }, [sg, filters, leagueByMatch]);
 
+  // Top picks of the day = picks that satisfy the user's "safe + max odds" goal.
+  // We pull from sg.simples (already prefiltered to prob ≥ 45% & odds ≥ 1.30)
+  // and rank by valueScore. To avoid showing 9 copies of the same selection
+  // type ("Under 10.5 Còrners") we apply a market-diversity cap of 2 per
+  // selection across the podium.
   const heroPicks = useMemo(() => {
     if (!sg) return [];
-    // Best 6 picks balancing safety + maximum odds (the user's explicit goal).
-    // Score = modelProb * odds (expected value) with small bonuses for live
-    // markets and tier-1 leagues, and a safety floor of ≥ 50% probability.
-    return [...sg.simples]
-      .filter((b) => b.modelProb >= 0.50 && b.odds >= 1.40)
-      .sort((a, b) => {
-        const tierA = leagueByMatch.get(a.matchId)?.tier ?? 9;
-        const tierB = leagueByMatch.get(b.matchId)?.tier ?? 9;
-        const sa = a.modelProb * a.odds + (a.source === "live" ? 0.04 : 0) + a.confidence * 0.05 - tierA * 0.005;
-        const sb = b.modelProb * b.odds + (b.source === "live" ? 0.04 : 0) + b.confidence * 0.05 - tierB * 0.005;
-        return sb - sa;
-      })
-      .slice(0, 6);
-  }, [sg, leagueByMatch]);
+    const ranked = [...sg.simples].sort((a, b) => b.valueScore - a.valueScore);
+    const perSelectionCount = new Map<string, number>();
+    const out: SimpleBet[] = [];
+    for (const b of ranked) {
+      // Use a coarse selection signature so "Under 2.5" from different matches
+      // counts as the same kind of pick.
+      const sig = `${b.market}::${b.selection}`;
+      const c = perSelectionCount.get(sig) ?? 0;
+      if (c >= 2) continue;
+      perSelectionCount.set(sig, c + 1);
+      out.push(b);
+      if (out.length >= 9) break;
+    }
+    return out;
+  }, [sg]);
 
-  // The single best pick of the day — composite of value, edge, confidence
-  // and DK-live preference. This is the headline "Aposta del dia".
+  // The single best pick of the day — top of the value ranking with a safety
+  // and confidence floor. Headline "Aposta del dia".
   const apostaDelDia = useMemo(() => {
     if (!sg) return null;
-    const pool = sg.simples.filter((b) => b.modelProb >= 0.55 && b.odds >= 1.55 && b.confidence >= 0.45);
+    const pool = sg.simples
+      .filter((b) => b.modelProb >= 0.50 && b.odds >= 1.50 && b.confidence >= 0.45);
     if (pool.length === 0) return null;
-    return [...pool].sort((a, b) => {
-      const sa = (a.modelProb * a.odds) + a.edge * 0.6 + a.confidence * 0.3 + (a.source === "live" ? 0.05 : 0);
-      const sb = (b.modelProb * b.odds) + b.edge * 0.6 + b.confidence * 0.3 + (b.source === "live" ? 0.05 : 0);
-      return sb - sa;
-    })[0]!;
+    return [...pool].sort((a, b) => b.valueScore - a.valueScore)[0]!;
   }, [sg]);
 
   return (
@@ -472,19 +549,35 @@ export default function Board() {
         <Stat label="Combinades"         value={sg?.combos.length ?? 0} icon={<Layers className="w-4 h-4" />} tint="text-amber-300" />
       </section>
 
-      {/* ============== HERO PICKS ============== */}
+      {/* ============== HERO PICKS · PODIUM ============== */}
       {heroPicks.length > 0 && (
         <section className="mb-8">
           <SectionHeader
             title="Top apostes del dia"
-            subtitle={`Les ${heroPicks.length} apostes que millor combinen seguretat (≥50% de probabilitat) amb la quota més alta possible. Ordenades per valor esperat.`}
+            subtitle="Les apostes amb millor relació probabilitat × quota d'avui. Busquem el punt dolç: el més probable possible amb la quota més alta possible. Els segells Joia i Valor són els que combinen tots dos."
             icon={<Star className="w-5 h-5" />}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {heroPicks.map((b, i) => (
-              <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />
-            ))}
-          </div>
+          {/* Podium row: top 3 picks first, larger and more emphatic. */}
+          {(() => {
+            const podium = heroPicks.slice(0, 3);
+            const rest   = heroPicks.slice(3, 9);
+            return (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                  {podium.map((b, i) => (
+                    <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />
+                  ))}
+                </div>
+                {rest.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {rest.map((b, i) => (
+                      <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 4} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </section>
       )}
 
@@ -525,11 +618,18 @@ export default function Board() {
 
       {/* ============== SIMPLE BETS ============== */}
       <section className="mb-12" id="simples">
-        <SectionHeader
-          title="Apostes simples · ordenades per risc"
-          subtitle="Filtra per nivell de risc o equip a la barra superior. Calcula el guany potencial pel pressupost que has marcat al cap (header)."
-          icon={<ShieldCheck className="w-5 h-5" />}
-        />
+        <div className="mb-4 flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-xl md:text-2xl font-semibold tracking-tight">
+              <span className="text-primary"><ShieldCheck className="w-5 h-5" /></span>
+              Apostes simples
+            </h2>
+            <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+              Cada selecció combina probabilitat i quota. Per defecte ordenem per <span className="text-primary font-semibold">valor</span> (prob × quota): el millor compromís entre seguretat i quota alta.
+            </p>
+          </div>
+          <SortPicker value={filters.sort} onChange={(s) => setFilters({ ...filters, sort: s })} />
+        </div>
         {suggestions.isLoading ? (
           <div className="space-y-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-16 w-full rounded-lg" />)}</div>
         ) : suggestions.isError ? (
@@ -544,9 +644,9 @@ export default function Board() {
               <div className="col-span-3">Selecció</div>
               <div className="col-span-1 text-center">Quota</div>
               <div className="col-span-1 text-center">Prob.</div>
-              <div className="col-span-1 text-center">Edge</div>
+              <div className="col-span-1 text-center" title="Valor esperat (prob × quota)">VE</div>
               <div className="col-span-1 text-right">Guany</div>
-              <div className="col-span-1 text-right">Risc</div>
+              <div className="col-span-1 text-right">Tipus</div>
             </div>
             {filteredSimples.map((b, i) => <SimpleBetRow key={b.id} bet={b} index={i + 1} bankroll={bankroll} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />)}
           </div>
@@ -973,7 +1073,7 @@ function HeroPickCard({
           <span className="inline-grid place-items-center w-6 h-6 rounded-md bg-primary/15 ring-1 ring-primary/40 text-primary text-[11px] font-bold font-mono">
             {rank}
           </span>
-          <RiskPill tier={bet.riskTier} compact />
+          <QualityBadge tier={bet.qualityTier} compact />
           {league && <LeagueBadge league={league} compact />}
         </div>
         <span className={
@@ -1375,10 +1475,10 @@ function SimpleBetRow({ bet, index, bankroll, league, slip }: { bet: SimpleBet; 
         <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">Prob.</span>
         <span className="font-mono text-sm">{pct(bet.modelProb)}</span>
       </div>
-      <div className="md:col-span-1 text-center flex md:block items-center justify-between">
-        <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">Edge</span>
-        <span className={"font-mono text-sm font-semibold " + (bet.edge > 0.05 ? "text-accent" : bet.edge > 0 ? "text-lime-300" : "text-muted-foreground")}>
-          {bet.edge > 0 ? "+" : ""}{(bet.edge * 100).toFixed(1)}%
+      <div className="md:col-span-1 text-center flex md:block items-center justify-between" title="Valor esperat = probabilitat × quota. >1.00 = +EV.">
+        <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">VE</span>
+        <span className={"font-mono text-sm font-semibold " + (bet.valueScore > 1.10 ? "text-accent" : bet.valueScore > 1.00 ? "text-lime-300" : "text-muted-foreground")}>
+          ×{bet.valueScore.toFixed(2)}
         </span>
       </div>
       <div className="md:col-span-1 text-right flex md:block items-center justify-between">
@@ -1393,7 +1493,7 @@ function SimpleBetRow({ bet, index, bankroll, league, slip }: { bet: SimpleBet; 
         </div>
       </div>
       <div className="md:col-span-1 flex md:justify-end items-center gap-1.5">
-        <RiskPill tier={bet.riskTier} compact />
+        <QualityBadge tier={bet.qualityTier} compact />
         <button
           type="button"
           onClick={() => slip.toggle({ id: bet.id, matchId: bet.matchId, matchLabel: bet.matchLabel, market: bet.market, selection: bet.selection, odds: bet.odds, modelProb: bet.modelProb, source: bet.source })}
@@ -1537,6 +1637,7 @@ function ApostaDelDiaHero({ bet, bankroll, match, league, slip }: { bet: SimpleB
                 <Crown className="w-3 h-3" />
                 Aposta del dia
               </span>
+              <QualityBadge tier={bet.qualityTier} compact />
               {league && <LeagueBadge league={league} compact />}
               <RiskPill tier={bet.riskTier} compact />
               <span className={
