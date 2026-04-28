@@ -61,6 +61,10 @@ export interface MatchPick {
   source: MarketSource;
   /** prob × odds. 1.0 = fair, > 1.0 = positive expected value vs the price. */
   valueScore: number;
+  /** Recommended Kelly fraction of bankroll (0..0.05, capped at 5%). */
+  kellyFraction: number;
+  /** Composite confidence score 0..1 (real DK + edge + sample size). */
+  confidence: number;
 }
 
 /**
@@ -198,21 +202,57 @@ const PRIOR_PENALTY_AWARDED = 0.27;   // ~27% of LL matches see at least one pen
 const PRIOR_RED_CARD       = 0.13;   // ~13% of LL matches see a red card
 
 /**
+ * Kelly Criterion: optimal fraction of bankroll to bet on a single outcome
+ * given the model probability `p` and decimal `odds`. Returns 0 when there's
+ * no edge. We always cap at `cap` (default 5% / "quarter Kelly") to stay
+ * survivable even if the model overshoots.
+ */
+export function kellyFraction(p: number, odds: number, cap = 0.05): number {
+  if (!isFinite(p) || !isFinite(odds) || p <= 0 || odds <= 1.001) return 0;
+  const b = odds - 1;
+  const q = 1 - p;
+  const f = (b * p - q) / b;
+  if (f <= 0) return 0;
+  // Quarter-Kelly to dampen variance; capped at `cap` of bankroll.
+  return +Math.min(cap, f * 0.25).toFixed(4);
+}
+
+/**
+ * Confidence (0..1) for a single market pick. Combines:
+ *   - market provenance (real DraftKings line is more trustworthy than model)
+ *   - edge magnitude (bigger edge = more conviction)
+ *   - probability sanity (extreme values get slightly penalised)
+ */
+export function confidenceScore(mk: { source: MarketSource; modelProb: number; edge: number | null }): number {
+  const liveBoost = mk.source === "live" ? 0.30 : 0.0;
+  const edge = mk.edge ?? 0;
+  const edgeBoost = Math.max(0, Math.min(0.35, edge * 2.5)); // edge of +14% gives full 0.35
+  // Sweet-spot bonus: probabilities near 0.45-0.78 are the most "decidable".
+  const p = mk.modelProb;
+  const sweet = p >= 0.40 && p <= 0.85 ? 0.20 : p >= 0.30 ? 0.10 : 0.0;
+  // Base 0.15 so we never report 0.
+  return +Math.min(1, 0.15 + liveBoost + edgeBoost + sweet).toFixed(3);
+}
+
+/**
  * Pick the strategic "best picks" for a match: a safe one (max prob with a
  * decent price), a value one (best probability × odds sweet spot), and a bold
  * one (high odds with the best supporting probability).
  */
 function toMatchPick(mk: BoardMarket): MatchPick {
   const odds = mk.odds ?? 1;
+  const p = mk.modelProb;
   return {
     key: mk.key,
     group: mk.group,
     selection: mk.selection,
     odds,
-    modelProb: mk.modelProb,
+    modelProb: p,
     edge: mk.edge ?? 0,
     source: mk.source,
-    valueScore: +(mk.modelProb * odds).toFixed(4),
+    valueScore: +(p * odds).toFixed(4),
+    kellyFraction: kellyFraction(p, odds),
+    confidence: confidenceScore(mk),
   };
 }
 
@@ -589,11 +629,16 @@ export interface SimpleBet {
   source: MarketSource;
   riskTier: "molt baix" | "baix" | "moderat" | "alt";
   rationale: string;
+  /** Quarter-Kelly fraction (0..0.05). Multiply by bankroll for stake €. */
+  kellyFraction: number;
+  /** Composite confidence 0..1. */
+  confidence: number;
 }
 
 export interface ComboBet {
   id: string;
   legs: {
+    matchId: number;
     matchLabel: string;
     market: string;
     selection: string;
@@ -605,6 +650,8 @@ export interface ComboBet {
   combinedProb: number;
   riskTier: "baix" | "moderat" | "alt" | "molt alt";
   rationale: string;
+  /** Combined edge (combinedProb × combinedOdds − 1). */
+  combinedEdge: number;
 }
 
 function tierForProb(p: number): SimpleBet["riskTier"] {
@@ -662,6 +709,8 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         source: mk.source,
         riskTier: tierForProb(mk.modelProb),
         rationale: rationaleFor(mk.modelProb, edge, mk.source),
+        kellyFraction: kellyFraction(mk.modelProb, mk.odds),
+        confidence: confidenceScore(mk),
       });
     }
 
@@ -686,6 +735,8 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
         source: best.source,
         riskTier: tierForProb(best.modelProb),
         rationale: `${pl.teamShort} · ${pl.positionLabel} · ${pl.seasonGoals}G ${pl.seasonAssists}A aquesta temporada.`,
+        kellyFraction: kellyFraction(best.modelProb, best.odds!),
+        confidence: confidenceScore(best),
       });
     }
   }
@@ -731,9 +782,11 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
   function makeCombo(legs: SimpleBet[], rationale: string): ComboBet {
     const combinedOdds = +legs.reduce((acc, l) => acc * l.odds, 1).toFixed(2);
     const combinedProb = +legs.reduce((acc, l) => acc * l.modelProb, 1).toFixed(4);
+    const combinedEdge = +(combinedProb * combinedOdds - 1).toFixed(4);
     return {
       id: `combo-${legs.length}-${legs.map((l) => l.id).join("-")}`,
       legs: legs.map((l) => ({
+        matchId: l.matchId,
         matchLabel: l.matchLabel,
         market: l.market,
         selection: l.selection,
@@ -743,6 +796,7 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
       })),
       combinedOdds,
       combinedProb,
+      combinedEdge,
       riskTier: tierForCombo(combinedProb),
       rationale,
     };

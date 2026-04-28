@@ -145,6 +145,45 @@ export interface MatchPrediction {
   oddsLastUpdate: string;
 }
 
+/**
+ * Pull H2H (head-to-head) signal from ESPN summary's `headToHeadGames`.
+ * Returns the average total goals over the last N completed meetings plus
+ * the home-favourable goal differential (positive = home historically scores
+ * more). Returns null when ESPN doesn't expose any prior matches.
+ */
+export function extractH2HSignal(summary: RawSummary | null, homeTeamId: number, _awayTeamId: number): { avgTotalGoals: number; homeAdvantage: number; n: number } | null {
+  const blocks = summary?.headToHeadGames;
+  if (!blocks?.length) return null;
+  type Cell = { total: number; homeGoals: number; awayGoals: number };
+  const cells: Cell[] = [];
+  for (const blk of blocks) {
+    for (const ev of blk.events ?? []) {
+      const comp = ev.competitors;
+      if (!comp || comp.length < 2) continue;
+      const teamA = comp[0]!;
+      const teamB = comp[1]!;
+      const sA = Number(teamA.score ?? "0");
+      const sB = Number(teamB.score ?? "0");
+      if (!isFinite(sA) || !isFinite(sB)) continue;
+      // Determine who was the "home" side in this past match
+      const aWasHome = teamA.homeAway === "home";
+      const homeId = aWasHome ? Number(teamA.team.id) : Number(teamB.team.id);
+      const homeGoals = aWasHome ? sA : sB;
+      const awayGoals = aWasHome ? sB : sA;
+      // Map past-match home/away back to current home/away viewpoint
+      const ourHomeIsPastHome = homeId === homeTeamId;
+      const ourHomeGoals = ourHomeIsPastHome ? homeGoals : awayGoals;
+      const ourAwayGoals = ourHomeIsPastHome ? awayGoals : homeGoals;
+      cells.push({ total: sA + sB, homeGoals: ourHomeGoals, awayGoals: ourAwayGoals });
+    }
+  }
+  if (cells.length === 0) return null;
+  const last = cells.slice(0, 6);
+  const avg = last.reduce((a, c) => a + c.total, 0) / last.length;
+  const homeAdvDiff = last.reduce((a, c) => a + (c.homeGoals - c.awayGoals), 0) / last.length;
+  return { avgTotalGoals: +avg.toFixed(3), homeAdvantage: +homeAdvDiff.toFixed(3), n: last.length };
+}
+
 export async function predictMatch(match: LiveMatch): Promise<{ prediction: MatchPrediction; poisson: PoissonResult; oddsRaw: RawOdds | null; summary: RawSummary | null }> {
   let summary: RawSummary | null = null;
   try {
@@ -156,15 +195,37 @@ export async function predictMatch(match: LiveMatch): Promise<{ prediction: Matc
 
   const fromBook = oddsRaw ? lambdasFromOdds(oddsRaw) : null;
   const fromRates = await lambdasFromTeamRates(match);
+  const h2h = extractH2HSignal(summary, match.homeTeamId, match.awayTeamId);
 
-  // If we have bookmaker totals, blend 70/30 toward bookmaker (real market signal).
+  // Blend strategy:
+  //   - With bookmaker:   65% book + 25% team-rates + 10% H2H (when ≥3 games)
+  //   - Without bookmaker: 70% team-rates + 30% H2H (when ≥3 games)
+  //   - H2H absent:       100% bookmaker(70%)+team(30%) or 100% team
   let lambdaH = fromRates.lambdaH;
   let lambdaA = fromRates.lambdaA;
   let source: MatchPrediction["source"] = "team-rates";
+  // H2H lambda derivation: split avg total goals proportionally to home advantage
+  let h2hLambdaH = lambdaH;
+  let h2hLambdaA = lambdaA;
+  if (h2h && h2h.n >= 3) {
+    const half = h2h.avgTotalGoals / 2;
+    // Map homeAdvantage (avg goal diff) to a fractional shift of about ±25%.
+    const shift = Math.max(-0.25, Math.min(0.25, h2h.homeAdvantage * 0.18));
+    h2hLambdaH = +(half * (1 + shift)).toFixed(3);
+    h2hLambdaA = +(half * (1 - shift)).toFixed(3);
+  }
   if (fromBook) {
-    lambdaH = +(fromBook.lambdaH * 0.7 + fromRates.lambdaH * 0.3).toFixed(3);
-    lambdaA = +(fromBook.lambdaA * 0.7 + fromRates.lambdaA * 0.3).toFixed(3);
+    if (h2h && h2h.n >= 3) {
+      lambdaH = +(fromBook.lambdaH * 0.65 + fromRates.lambdaH * 0.25 + h2hLambdaH * 0.10).toFixed(3);
+      lambdaA = +(fromBook.lambdaA * 0.65 + fromRates.lambdaA * 0.25 + h2hLambdaA * 0.10).toFixed(3);
+    } else {
+      lambdaH = +(fromBook.lambdaH * 0.7 + fromRates.lambdaH * 0.3).toFixed(3);
+      lambdaA = +(fromBook.lambdaA * 0.7 + fromRates.lambdaA * 0.3).toFixed(3);
+    }
     source = "blended";
+  } else if (h2h && h2h.n >= 3) {
+    lambdaH = +(fromRates.lambdaH * 0.7 + h2hLambdaH * 0.3).toFixed(3);
+    lambdaA = +(fromRates.lambdaA * 0.7 + h2hLambdaA * 0.3).toFixed(3);
   }
   const poisson = poissonPredict(lambdaH, lambdaA, 7);
 
@@ -372,12 +433,20 @@ export async function buildPlayerPropsForSide(match: LiveMatch, side: "home" | "
   const teamShort = side === "home" ? match.homeTeam.shortName : match.awayTeam.shortName;
   const leaders = rowsFromLeaders(summary, side, teamId);
   if (leaders.length === 0) return [];
-  // Total team goals/assists = sum of top leaders (proxy for season totals; conservative).
-  const totalGoals = Math.max(1, leaders.reduce((s, r) => s + r.goals, 0));
-  const totalAssists = Math.max(1, leaders.reduce((s, r) => s + r.assists, 0));
+  // ESPN's `leaders` block typically returns the top 3-5 scorers/assisters,
+  // which together account for ~65-75% of a team's season goals/assists.
+  // Scaling by leader-sum alone over-concentrates xG into the top scorer
+  // (e.g. Lewandowski getting 90% of team xG in a match). We divide by
+  // leader-sum / 0.70 so the share is realistic, and cap individual share at
+  // 0.42 to keep prices honest for high-scoring teams.
+  const leaderGoalSum = leaders.reduce((s, r) => s + r.goals, 0);
+  const leaderAssistSum = leaders.reduce((s, r) => s + r.assists, 0);
+  const totalGoals = Math.max(1, leaderGoalSum / 0.70);
+  const totalAssists = Math.max(1, leaderAssistSum / 0.70);
+  const SHARE_CAP = 0.42;
   return leaders.map((r) => {
-    const goalShare = r.goals / totalGoals;
-    const assistShare = r.assists / totalAssists;
+    const goalShare = Math.min(SHARE_CAP, r.goals / totalGoals);
+    const assistShare = Math.min(SHARE_CAP, r.assists / totalAssists);
     const expectedGoals = +(lambdaTeam * goalShare).toFixed(3);
     const expectedAssists = +(lambdaTeam * assistShare * 0.7).toFixed(3); // ~70% of goals get a primary assist
     return {

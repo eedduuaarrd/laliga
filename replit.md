@@ -26,6 +26,20 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
+## Futbol Edge (v0.7.0 — April 2026, Kelly + confidence + bet slip + Aposta del dia)
+
+### v0.7.0 changelog (current)
+
+- **Backend** (`predictions.ts`): added `extractH2HSignal()` from ESPN summary `headToHeadGames` (last 6); `predictMatch()` now blends 65% book + 25% rates + 10% H2H when ≥3 H2H games exist (or 70/30 rates/H2H without book). Player props denominator changed from /1.0 to /0.70 (more realistic season fraction); `SHARE_CAP=0.42` so no single striker monopolises team xG.
+- **Backend** (`bet365.ts`): added `kellyFraction(p,odds,cap=0.05)` (¼-Kelly capped at 5%) and `confidenceScore()` (model agreement with book + edge bonus + sweet-spot bonus + DK-live boost). Both attached to every `MatchPick`, `SimpleBet`, and `ComboBet.legs[].matchId` for combo independence enforcement.
+- **Frontend** (`board.tsx`):
+  - **Bet slip**: floating bottom-right panel (`BetSlipPanel`) with localStorage persistence (`futbol-edge-slip`). `useBetSlip()` enforces combo independence (replaces existing leg from same match). Shows combined odds/prob/EV ratio + custom stake input + projected payout. "+ Afegir al butlletí" buttons on every market chip, hero card, simple bet row, and best-pick card. "Carrega aquesta combinada" one-click loader on each combo card.
+  - **Aposta del dia hero**: full-width banner at the top selecting the single highest-composite-score simple bet (modelProb × odds + edge weight + confidence weight + DK-live boost). Shows quota / probability / Kelly stake / projected profit prominently.
+  - **Kelly stake suggestion**: every hero card, best-pick card, and simple bet row now displays the recommended ¼-Kelly stake (€) and projected profit at that stake.
+  - **Confidence indicator** (`ConfidenceBar`): compact bar showing model confidence with colour tier (high/mid/low) on every pick card and the Aposta del dia hero.
+  - **1X2 probability bar** (`ProbabilityBar`): visual home/draw/away breakdown rendered between teams and best-picks bar inside each `MatchCard`.
+  - Hero pick scoring now includes `confidence × 0.05` so high-confidence value picks rise above mediocre ones with the same EV.
+
 ## Futbol Edge (v0.6.0 — April 2026, keyless, multi-league, per-match best picks)
 
 A focused, single-page **multi-league football betting board** with REAL bookmaker odds + a probabilistic model. The whole UI is in Catalan with a matte-black aesthetic and a single amber/gold accent. **Zero API keys required.**

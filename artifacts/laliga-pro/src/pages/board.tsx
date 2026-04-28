@@ -25,6 +25,12 @@ import {
   Lock,
   Scale,
   Rocket,
+  Plus,
+  Check,
+  X,
+  Trash2,
+  Crown,
+  Calculator,
 } from "lucide-react";
 import { Layout } from "@/components/layout";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -74,6 +80,8 @@ interface MatchPick {
   edge: number;
   source: MarketSource;
   valueScore: number;
+  kellyFraction: number;
+  confidence: number;
 }
 interface MatchBestPicks {
   safe: MatchPick | null;
@@ -125,10 +133,13 @@ interface SimpleBet {
   source: MarketSource;
   riskTier: "molt baix" | "baix" | "moderat" | "alt";
   rationale: string;
+  kellyFraction: number;
+  confidence: number;
 }
 interface ComboBet {
   id: string;
   legs: {
+    matchId: number;
     matchLabel: string;
     market: string;
     selection: string;
@@ -140,6 +151,7 @@ interface ComboBet {
   combinedProb: number;
   riskTier: "baix" | "moderat" | "alt" | "molt alt";
   rationale: string;
+  combinedEdge: number;
 }
 interface SuggestionsResponse {
   source: string;
@@ -187,6 +199,58 @@ function useBankroll(): [number, (n: number) => void] {
     window.localStorage.setItem("futbol-edge-bankroll", String(v));
   }, [v]);
   return [v, setV];
+}
+
+// ---------------------------------------------------------------------------
+// Bet slip — picks the user has selected, persisted to localStorage.
+// Shown as a floating panel (bottom-right) with combined odds + payout.
+// ---------------------------------------------------------------------------
+interface SlipBet {
+  id: string;            // unique key per leg
+  matchId: number;
+  matchLabel: string;
+  market: string;        // group
+  selection: string;
+  odds: number;
+  modelProb: number;
+  source: MarketSource;
+}
+const SLIP_STORE_KEY = "futbol-edge-slip";
+function useBetSlip() {
+  const [legs, setLegs] = useState<SlipBet[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(SLIP_STORE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as SlipBet[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SLIP_STORE_KEY, JSON.stringify(legs));
+  }, [legs]);
+  const has = (id: string) => legs.some((l) => l.id === id);
+  const add = (b: SlipBet) => {
+    setLegs((cur) => {
+      // Replace any existing leg from the same match (combos must be independent)
+      const filtered = cur.filter((l) => l.matchId !== b.matchId);
+      return [...filtered, b];
+    });
+  };
+  const remove = (id: string) => setLegs((cur) => cur.filter((l) => l.id !== id));
+  const toggle = (b: SlipBet) => (has(b.id) ? remove(b.id) : add(b));
+  const clear = () => setLegs([]);
+  return { legs, add, remove, toggle, has, clear };
+}
+
+// Quarter-Kelly stake suggestion in € (clamped to 0.5..bankroll).
+function kellyStakeEur(kellyFraction: number, bankroll: number): number {
+  if (!isFinite(kellyFraction) || kellyFraction <= 0) return 0;
+  const raw = bankroll * kellyFraction;
+  return Math.max(0, Math.min(bankroll, raw));
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +352,7 @@ export default function Board() {
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [bankroll, setBankroll] = useBankroll();
   const [edgeOnly, setEdgeOnly] = useState(false);
+  const slip = useBetSlip();
 
   const live = data?.matches.filter((m) => m.status === "live") ?? [];
   const upcoming = data?.matches.filter((m) => m.status === "upcoming") ?? [];
@@ -346,12 +411,25 @@ export default function Board() {
       .sort((a, b) => {
         const tierA = leagueByMatch.get(a.matchId)?.tier ?? 9;
         const tierB = leagueByMatch.get(b.matchId)?.tier ?? 9;
-        const sa = a.modelProb * a.odds + (a.source === "live" ? 0.04 : 0) - tierA * 0.005;
-        const sb = b.modelProb * b.odds + (b.source === "live" ? 0.04 : 0) - tierB * 0.005;
+        const sa = a.modelProb * a.odds + (a.source === "live" ? 0.04 : 0) + a.confidence * 0.05 - tierA * 0.005;
+        const sb = b.modelProb * b.odds + (b.source === "live" ? 0.04 : 0) + b.confidence * 0.05 - tierB * 0.005;
         return sb - sa;
       })
       .slice(0, 6);
   }, [sg, leagueByMatch]);
+
+  // The single best pick of the day — composite of value, edge, confidence
+  // and DK-live preference. This is the headline "Aposta del dia".
+  const apostaDelDia = useMemo(() => {
+    if (!sg) return null;
+    const pool = sg.simples.filter((b) => b.modelProb >= 0.55 && b.odds >= 1.55 && b.confidence >= 0.45);
+    if (pool.length === 0) return null;
+    return [...pool].sort((a, b) => {
+      const sa = (a.modelProb * a.odds) + a.edge * 0.6 + a.confidence * 0.3 + (a.source === "live" ? 0.05 : 0);
+      const sb = (b.modelProb * b.odds) + b.edge * 0.6 + b.confidence * 0.3 + (b.source === "live" ? 0.05 : 0);
+      return sb - sa;
+    })[0]!;
+  }, [sg]);
 
   return (
     <Layout
@@ -375,6 +453,17 @@ export default function Board() {
         </div>
       )}
 
+      {/* ============== APOSTA DEL DIA ============== */}
+      {apostaDelDia && (
+        <ApostaDelDiaHero
+          bet={apostaDelDia}
+          bankroll={bankroll}
+          match={data?.matches.find((m) => m.matchId === apostaDelDia.matchId) ?? null}
+          league={leagueByMatch.get(apostaDelDia.matchId) ?? null}
+          slip={slip}
+        />
+      )}
+
       {/* ============== HERO METRICS ============== */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <Stat label="Partits en directe" value={live.length} icon={<Flame className="w-4 h-4" />} tint="text-red-300" />
@@ -393,7 +482,7 @@ export default function Board() {
           />
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {heroPicks.map((b, i) => (
-              <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} />
+              <HeroPickCard key={b.id} bet={b} bankroll={bankroll} rank={i + 1} matchById={data?.matches} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />
             ))}
           </div>
         </section>
@@ -429,7 +518,7 @@ export default function Board() {
           <EmptyBlock label={data && data.matches.length > 0 ? "Cap partit coincideix amb els filtres actuals." : "No hi ha partits a la finestra."} />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {filteredMatches.map((m) => <MatchCard key={m.matchId} match={m} bankroll={bankroll} edgeOnly={edgeOnly} />)}
+            {filteredMatches.map((m) => <MatchCard key={m.matchId} match={m} bankroll={bankroll} edgeOnly={edgeOnly} slip={slip} />)}
           </div>
         )}
       </section>
@@ -459,7 +548,7 @@ export default function Board() {
               <div className="col-span-1 text-right">Guany</div>
               <div className="col-span-1 text-right">Risc</div>
             </div>
-            {filteredSimples.map((b, i) => <SimpleBetRow key={b.id} bet={b} index={i + 1} bankroll={bankroll} league={leagueByMatch.get(b.matchId) ?? null} />)}
+            {filteredSimples.map((b, i) => <SimpleBetRow key={b.id} bet={b} index={i + 1} bankroll={bankroll} league={leagueByMatch.get(b.matchId) ?? null} slip={slip} />)}
           </div>
         )}
       </section>
@@ -479,10 +568,13 @@ export default function Board() {
           <EmptyBlock label="Cal almenys 2 partits amb seleccions de confiança per construir combinades." />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {sg.combos.map((c) => <ComboCard key={c.id} combo={c} bankroll={bankroll} />)}
+            {sg.combos.map((c) => <ComboCard key={c.id} combo={c} bankroll={bankroll} slip={slip} />)}
           </div>
         )}
       </section>
+
+      {/* ============== FLOATING BET SLIP ============== */}
+      <BetSlipPanel slip={slip} bankroll={bankroll} />
     </Layout>
   );
 }
@@ -717,7 +809,7 @@ const PICK_FLAVORS = {
 
 type PickFlavor = keyof typeof PICK_FLAVORS;
 
-function BestPicksBar({ bestPicks, bankroll }: { bestPicks: MatchBestPicks; bankroll: number }) {
+function BestPicksBar({ bestPicks, bankroll, slip, match }: { bestPicks: MatchBestPicks; bankroll: number; slip: ReturnType<typeof useBetSlip>; match: BoardMatch }) {
   const items: { flavor: PickFlavor; pick: MatchPick }[] = [];
   if (bestPicks.safe) items.push({ flavor: "safe", pick: bestPicks.safe });
   if (bestPicks.value) items.push({ flavor: "value", pick: bestPicks.value });
@@ -741,17 +833,20 @@ function BestPicksBar({ bestPicks, bankroll }: { bestPicks: MatchBestPicks; bank
       </div>
       <div className={"grid gap-2 " + (items.length === 3 ? "grid-cols-3" : items.length === 2 ? "grid-cols-2" : "grid-cols-1")}>
         {items.map(({ flavor, pick }) => (
-          <BestPickCard key={pick.key} flavor={flavor} pick={pick} bankroll={bankroll} />
+          <BestPickCard key={pick.key} flavor={flavor} pick={pick} bankroll={bankroll} slip={slip} match={match} />
         ))}
       </div>
     </div>
   );
 }
 
-function BestPickCard({ flavor, pick, bankroll }: { flavor: PickFlavor; pick: MatchPick; bankroll: number }) {
+function BestPickCard({ flavor, pick, bankroll, slip, match }: { flavor: PickFlavor; pick: MatchPick; bankroll: number; slip: ReturnType<typeof useBetSlip>; match: BoardMatch }) {
   const f = PICK_FLAVORS[flavor];
   const Icon = f.icon;
-  const profit = bankroll * pick.odds - bankroll;
+  const stake = kellyStakeEur(pick.kellyFraction, bankroll);
+  const profit = stake > 0 ? stake * pick.odds - stake : bankroll * pick.odds - bankroll;
+  const slipId = `${match.matchId}-${pick.key}`;
+  const inSlip = slip.has(slipId);
   return (
     <div
       className={
@@ -775,12 +870,42 @@ function BestPickCard({ flavor, pick, bankroll }: { flavor: PickFlavor; pick: Ma
       <div className="text-[12.5px] font-semibold leading-tight line-clamp-2 min-h-[2.4em]">
         {pick.selection}
       </div>
+      <ConfidenceBar confidence={pick.confidence} />
       <div className="flex items-center justify-between text-[10px] font-mono pt-1 border-t border-border/40">
         <span className="text-muted-foreground">
           <span className={f.accent + " font-semibold"}>{pct(pick.modelProb)}</span> prob
         </span>
+        {stake > 0 && (
+          <span className="text-primary/90 font-semibold" title="Aposta recomanada (Kelly)">
+            <Calculator className="inline w-2.5 h-2.5 -mt-0.5 mr-0.5" />{eur(stake)}
+          </span>
+        )}
         <span className="text-accent font-semibold">+{eur(profit)}</span>
       </div>
+      <button
+        type="button"
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); slip.toggle({ id: slipId, matchId: match.matchId, matchLabel: `${match.homeShort} vs ${match.awayShort}`, market: pick.group, selection: pick.selection, odds: pick.odds, modelProb: pick.modelProb, source: pick.source }); }}
+        className={
+          "mt-1 w-full text-[10px] uppercase tracking-[0.14em] font-semibold py-1 rounded transition-colors flex items-center justify-center gap-1 " +
+          (inSlip ? "bg-accent/20 text-accent ring-1 ring-inset ring-accent/40" : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground ring-1 ring-inset ring-border/40")
+        }
+      >
+        {inSlip ? <><Check className="w-3 h-3" /> Al butlletí</> : <><Plus className="w-3 h-3" /> Afegir al butlletí</>}
+      </button>
+    </div>
+  );
+}
+
+function ConfidenceBar({ confidence }: { confidence: number }) {
+  const pctVal = Math.max(0, Math.min(1, confidence));
+  const tier = pctVal >= 0.7 ? { color: "bg-accent", label: "Alta" } : pctVal >= 0.45 ? { color: "bg-amber-400", label: "Mitjana" } : { color: "bg-orange-400", label: "Baixa" };
+  return (
+    <div className="flex items-center gap-1.5" title={`Confiança ${tier.label} · ${(pctVal * 100).toFixed(0)}%`}>
+      <ShieldCheck className="w-2.5 h-2.5 text-muted-foreground/70 shrink-0" />
+      <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+        <div className={"h-full " + tier.color} style={{ width: `${(pctVal * 100).toFixed(0)}%` }} />
+      </div>
+      <span className="text-[9px] text-muted-foreground font-mono tabular-nums">{(pctVal * 100).toFixed(0)}</span>
     </div>
   );
 }
@@ -827,19 +952,19 @@ function ValueStars({ value }: { value: number }) {
 }
 
 function HeroPickCard({
-  bet, bankroll, rank, matchById, league,
+  bet, bankroll, rank, matchById, league, slip,
 }: {
-  bet: SimpleBet; bankroll: number; rank: number; matchById: BoardMatch[] | undefined; league: League | null;
+  bet: SimpleBet; bankroll: number; rank: number; matchById: BoardMatch[] | undefined; league: League | null; slip: ReturnType<typeof useBetSlip>;
 }) {
   const match = matchById?.find((m) => m.matchId === bet.matchId);
-  const payout = bankroll * bet.odds;
-  const profit = payout - bankroll;
+  const stake = kellyStakeEur(bet.kellyFraction, bankroll);
+  const payout = stake > 0 ? stake * bet.odds : bankroll * bet.odds;
+  const profit = stake > 0 ? payout - stake : payout - bankroll;
   const valueScore = bet.modelProb * bet.odds;
+  const slipId = bet.id;
+  const inSlip = slip.has(slipId);
   return (
-    <a
-      href="#matches"
-      className="matte-card matte-card-hover rounded-xl p-4 flex flex-col gap-3 group relative overflow-hidden"
-    >
+    <div className="matte-card matte-card-hover rounded-xl p-4 flex flex-col gap-3 group relative overflow-hidden">
       <div className="absolute top-0 right-0 w-32 h-32 rounded-full blur-3xl opacity-20 bg-primary -mr-10 -mt-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 w-24 h-24 rounded-full blur-3xl opacity-10 bg-accent -ml-8 -mb-8 pointer-events-none" />
 
@@ -872,6 +997,7 @@ function HeroPickCard({
           <ValueStars value={valueScore} />
         </div>
         <div className="text-base font-semibold mt-0.5 leading-tight">{bet.selection}</div>
+        <div className="mt-2"><ConfidenceBar confidence={bet.confidence} /></div>
       </div>
 
       <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border/40 relative">
@@ -880,24 +1006,37 @@ function HeroPickCard({
           <div className="font-mono text-lg font-bold text-primary leading-tight">{bet.odds.toFixed(2)}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Prob.</div>
-          <div className="font-mono text-lg font-bold text-emerald-300 leading-tight">{pct(bet.modelProb)}</div>
+          <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground" title="Aposta recomanada (Kelly ¼)">Kelly</div>
+          <div className="font-mono text-lg font-bold text-amber-300 leading-tight">{stake > 0 ? eur(stake) : "—"}</div>
         </div>
         <div className="text-right">
-          <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Guany</div>
+          <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">{stake > 0 ? "Guany Kelly" : "Guany"}</div>
           <div className="font-mono text-lg font-bold text-accent leading-tight">+{eur(profit)}</div>
         </div>
       </div>
 
-      <div className="text-[10px] text-muted-foreground flex items-center gap-1 relative">
-        {bet.status === "live" ? (
-          <><span className="pulse-dot scale-75" /><span className="text-red-300">en directe</span></>
-        ) : (
-          <><Clock className="w-3 h-3" />{fmtKickoff(bet.kickoff)}</>
-        )}
-        <span className="ml-auto text-muted-foreground/60">VE ×{valueScore.toFixed(2)}</span>
+      <div className="flex items-center gap-2 relative">
+        <div className="text-[10px] text-muted-foreground flex items-center gap-1 flex-1">
+          {bet.status === "live" ? (
+            <><span className="pulse-dot scale-75" /><span className="text-red-300">en directe</span></>
+          ) : (
+            <><Clock className="w-3 h-3" />{fmtKickoff(bet.kickoff)}</>
+          )}
+          <span className="ml-auto text-muted-foreground/60">VE ×{valueScore.toFixed(2)}</span>
+        </div>
       </div>
-    </a>
+
+      <button
+        type="button"
+        onClick={() => slip.toggle({ id: slipId, matchId: bet.matchId, matchLabel: bet.matchLabel, market: bet.market, selection: bet.selection, odds: bet.odds, modelProb: bet.modelProb, source: bet.source })}
+        className={
+          "w-full text-[11px] uppercase tracking-[0.14em] font-semibold py-2 rounded transition-colors flex items-center justify-center gap-1.5 " +
+          (inSlip ? "bg-accent/20 text-accent ring-1 ring-inset ring-accent/40" : "bg-primary/10 text-primary hover:bg-primary/20 ring-1 ring-inset ring-primary/30")
+        }
+      >
+        {inSlip ? <><Check className="w-3.5 h-3.5" /> Al butlletí</> : <><Plus className="w-3.5 h-3.5" /> Afegir al butlletí</>}
+      </button>
+    </div>
   );
 }
 
@@ -917,7 +1056,7 @@ function countPositiveEdges(list: Market[]): number {
   return list.filter((m) => (m.edge ?? 0) > 0.02).length;
 }
 
-function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll: number; edgeOnly: boolean }) {
+function MatchCard({ match, bankroll, edgeOnly, slip }: { match: BoardMatch; bankroll: number; edgeOnly: boolean; slip: ReturnType<typeof useBetSlip> }) {
   const baseGrouped = useMemo(() => groupMarkets(match.markets), [match.markets]);
   // When edgeOnly, drop selections with edge <= +2% from each group
   const grouped = useMemo(() => {
@@ -1017,8 +1156,11 @@ function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll:
         </div>
       </div>
 
+      {/* 1X2 PROBABILITY BAR (model) */}
+      <ProbabilityBar match={match} />
+
       {/* BEST PICKS — 3 strategic picks per match */}
-      <BestPicksBar bestPicks={match.bestPicks} bankroll={bankroll} />
+      <BestPicksBar bestPicks={match.bestPicks} bankroll={bankroll} slip={slip} match={match} />
 
       {/* TABS */}
       <div className="border-b border-border/50 px-2 pt-2 flex items-center gap-1 overflow-x-auto">
@@ -1053,9 +1195,9 @@ function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll:
       {/* TAB BODY */}
       <div className="p-3 space-y-3 flex-1">
         {activeTab?.key === "players" ? (
-          <PlayersTab homePlayers={filteredPlayers.filter((p) => p.team === "home")} awayPlayers={filteredPlayers.filter((p) => p.team === "away")} match={match} />
+          <PlayersTab homePlayers={filteredPlayers.filter((p) => p.team === "home")} awayPlayers={filteredPlayers.filter((p) => p.team === "away")} match={match} slip={slip} />
         ) : activeTab ? (
-          <ActiveMarketsTab grouped={grouped} groups={activeTab.groups} />
+          <ActiveMarketsTab grouped={grouped} groups={activeTab.groups} match={match} slip={slip} />
         ) : (
           <div className="text-xs text-muted-foreground text-center py-6">
             {edgeOnly ? "Cap mercat amb edge positiu en aquest partit." : "No hi ha mercats per a aquest partit."}
@@ -1072,7 +1214,7 @@ function MatchCard({ match, bankroll, edgeOnly }: { match: BoardMatch; bankroll:
   );
 }
 
-function ActiveMarketsTab({ grouped, groups }: { grouped: Record<string, Market[]>; groups: string[] }) {
+function ActiveMarketsTab({ grouped, groups, match, slip }: { grouped: Record<string, Market[]>; groups: string[]; match: BoardMatch; slip: ReturnType<typeof useBetSlip> }) {
   const presentGroups = groups.filter((g) => grouped[g]);
   return (
     <div className="space-y-3">
@@ -1080,7 +1222,7 @@ function ActiveMarketsTab({ grouped, groups }: { grouped: Record<string, Market[
         <div key={g}>
           <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-1.5 px-1">{g}</div>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {grouped[g]!.map((mk) => <MarketChip key={mk.key} market={mk} />)}
+            {grouped[g]!.map((mk) => <MarketChip key={mk.key} market={mk} group={g} match={match} slip={slip} />)}
           </div>
         </div>
       ))}
@@ -1088,16 +1230,16 @@ function ActiveMarketsTab({ grouped, groups }: { grouped: Record<string, Market[
   );
 }
 
-function PlayersTab({ homePlayers, awayPlayers, match }: { homePlayers: PlayerMarket[]; awayPlayers: PlayerMarket[]; match: BoardMatch }) {
+function PlayersTab({ homePlayers, awayPlayers, match, slip }: { homePlayers: PlayerMarket[]; awayPlayers: PlayerMarket[]; match: BoardMatch; slip: ReturnType<typeof useBetSlip> }) {
   return (
     <div className="space-y-3">
-      {homePlayers.length > 0 && <PlayerSection title={match.homeShort} crest={match.homeCrest} players={homePlayers} />}
-      {awayPlayers.length > 0 && <PlayerSection title={match.awayShort} crest={match.awayCrest} players={awayPlayers} />}
+      {homePlayers.length > 0 && <PlayerSection title={match.homeShort} crest={match.homeCrest} players={homePlayers} match={match} slip={slip} />}
+      {awayPlayers.length > 0 && <PlayerSection title={match.awayShort} crest={match.awayCrest} players={awayPlayers} match={match} slip={slip} />}
     </div>
   );
 }
 
-function PlayerSection({ title, crest, players }: { title: string; crest: string; players: PlayerMarket[] }) {
+function PlayerSection({ title, crest, players, match, slip }: { title: string; crest: string; players: PlayerMarket[]; match: BoardMatch; slip: ReturnType<typeof useBetSlip> }) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-1.5 px-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
@@ -1105,13 +1247,13 @@ function PlayerSection({ title, crest, players }: { title: string; crest: string
         {title}
       </div>
       <div className="space-y-2">
-        {players.map((p) => <PlayerRow key={p.playerId} player={p} />)}
+        {players.map((p) => <PlayerRow key={p.playerId} player={p} match={match} slip={slip} />)}
       </div>
     </div>
   );
 }
 
-function PlayerRow({ player }: { player: PlayerMarket }) {
+function PlayerRow({ player, match, slip }: { player: PlayerMarket; match: BoardMatch; slip: ReturnType<typeof useBetSlip> }) {
   return (
     <div className="rounded-md border border-border/50 bg-muted/10 p-2.5">
       <div className="flex items-center gap-2 mb-2">
@@ -1130,26 +1272,31 @@ function PlayerRow({ player }: { player: PlayerMarket }) {
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        {player.markets.map((mk) => <MarketChip key={mk.key} market={mk} />)}
+        {player.markets.map((mk) => <MarketChip key={mk.key} market={mk} group={`${player.playerName}`} match={match} slip={slip} />)}
       </div>
     </div>
   );
 }
 
-function MarketChip({ market }: { market: Market }) {
+function MarketChip({ market, group, match, slip }: { market: Market; group: string; match: BoardMatch; slip: ReturnType<typeof useBetSlip> }) {
   const edge = market.edge ?? 0;
   const isPositive = edge > 0.02;
   const isNegative = edge < -0.05;
   const isLive = market.source === "live";
+  const slipId = `${match.matchId}-${market.key}`;
+  const inSlip = slip.has(slipId);
+  const canAdd = !!market.odds && market.odds > 1.01;
   return (
     <div
       className={
         "relative rounded-md px-2.5 py-2 border flex flex-col gap-0.5 transition-colors " +
-        (isPositive
-          ? "border-accent/40 bg-accent/[0.06] hover:bg-accent/[0.1]"
-          : isNegative
-            ? "border-border/40 bg-muted/20 opacity-60"
-            : "border-border/60 bg-muted/20 hover:bg-muted/30")
+        (inSlip
+          ? "border-accent/60 bg-accent/[0.1] ring-1 ring-inset ring-accent/30"
+          : isPositive
+            ? "border-accent/40 bg-accent/[0.06] hover:bg-accent/[0.1]"
+            : isNegative
+              ? "border-border/40 bg-muted/20 opacity-60"
+              : "border-border/60 bg-muted/20 hover:bg-muted/30")
       }
     >
       <div className="flex items-center justify-between gap-2">
@@ -1169,6 +1316,19 @@ function MarketChip({ market }: { market: Market }) {
           </span>
         )}
       </div>
+      {canAdd && (
+        <button
+          type="button"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); slip.toggle({ id: slipId, matchId: match.matchId, matchLabel: `${match.homeShort} vs ${match.awayShort}`, market: group, selection: market.selection, odds: market.odds!, modelProb: market.modelProb, source: market.source }); }}
+          className={
+            "mt-1 text-[9px] uppercase tracking-[0.14em] font-semibold py-0.5 rounded transition-colors flex items-center justify-center gap-1 " +
+            (inSlip ? "bg-accent/20 text-accent" : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.1] hover:text-foreground")
+          }
+          title={inSlip ? "Treure del butlletí" : "Afegir al butlletí"}
+        >
+          {inSlip ? <><Check className="w-2.5 h-2.5" /> Al butlletí</> : <><Plus className="w-2.5 h-2.5" /> Afegir</>}
+        </button>
+      )}
     </div>
   );
 }
@@ -1176,11 +1336,13 @@ function MarketChip({ market }: { market: Market }) {
 // ---------------------------------------------------------------------------
 // Simple bet row
 // ---------------------------------------------------------------------------
-function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index: number; bankroll: number; league: League | null }) {
-  const profit = bankroll * bet.odds - bankroll;
+function SimpleBetRow({ bet, index, bankroll, league, slip }: { bet: SimpleBet; index: number; bankroll: number; league: League | null; slip: ReturnType<typeof useBetSlip> }) {
+  const stake = kellyStakeEur(bet.kellyFraction, bankroll);
+  const profit = stake > 0 ? stake * bet.odds - stake : bankroll * bet.odds - bankroll;
+  const inSlip = slip.has(bet.id);
   return (
-    <div className="grid grid-cols-1 md:grid-cols-12 gap-2 px-4 py-3 border-b border-border/40 last:border-b-0 hover:bg-white/[0.02] transition-colors">
-      <div className="hidden md:flex md:col-span-1 items-center">
+    <div className={"grid grid-cols-1 md:grid-cols-12 gap-2 px-4 py-3 border-b border-border/40 last:border-b-0 hover:bg-white/[0.02] transition-colors " + (inSlip ? "bg-accent/[0.04]" : "")}>
+      <div className="hidden md:flex md:col-span-1 items-center gap-1.5">
         <span className="text-xs font-mono text-muted-foreground">{String(index).padStart(2, "0")}</span>
       </div>
       <div className="md:col-span-3 flex flex-col min-w-0">
@@ -1196,13 +1358,14 @@ function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index:
           )}
         </span>
       </div>
-      <div className="md:col-span-3 flex flex-col">
+      <div className="md:col-span-3 flex flex-col gap-1">
         <span className="font-semibold text-sm flex items-center gap-1.5">
           <span className={"inline-block w-1.5 h-1.5 rounded-full " + (bet.source === "live" ? "bg-accent" : "bg-primary/70")}
             title={bet.source === "live" ? "Quota real DraftKings" : "Quota del model"} />
           {bet.selection}
         </span>
         <span className="text-[11px] text-muted-foreground">{bet.market} · {bet.rationale}</span>
+        <ConfidenceBar confidence={bet.confidence} />
       </div>
       <div className="md:col-span-1 text-center flex md:block items-center justify-between">
         <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">Quota</span>
@@ -1219,11 +1382,31 @@ function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index:
         </span>
       </div>
       <div className="md:col-span-1 text-right flex md:block items-center justify-between">
-        <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">Guany</span>
-        <span className="font-mono text-sm font-semibold text-accent">+{eur(profit)}</span>
+        <span className="md:hidden text-[10px] text-muted-foreground uppercase tracking-wider">Aposta · Guany</span>
+        <div className="md:flex md:flex-col md:items-end">
+          <span className="font-mono text-sm font-semibold text-accent leading-tight">+{eur(profit)}</span>
+          {stake > 0 && (
+            <span className="font-mono text-[10px] text-amber-300/80 leading-tight" title="Aposta recomanada (Kelly ¼)">
+              <Calculator className="inline w-2.5 h-2.5 -mt-0.5 mr-0.5" />{eur(stake)}
+            </span>
+          )}
+        </div>
       </div>
-      <div className="md:col-span-1 flex md:justify-end items-center">
+      <div className="md:col-span-1 flex md:justify-end items-center gap-1.5">
         <RiskPill tier={bet.riskTier} compact />
+        <button
+          type="button"
+          onClick={() => slip.toggle({ id: bet.id, matchId: bet.matchId, matchLabel: bet.matchLabel, market: bet.market, selection: bet.selection, odds: bet.odds, modelProb: bet.modelProb, source: bet.source })}
+          className={
+            "shrink-0 inline-grid place-items-center w-7 h-7 rounded-md transition-colors " +
+            (inSlip
+              ? "bg-accent/20 text-accent ring-1 ring-inset ring-accent/40"
+              : "bg-white/[0.04] text-muted-foreground hover:bg-primary/15 hover:text-primary ring-1 ring-inset ring-border/40")
+          }
+          title={inSlip ? "Treure del butlletí" : "Afegir al butlletí"}
+        >
+          {inSlip ? <Check className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+        </button>
       </div>
     </div>
   );
@@ -1232,10 +1415,26 @@ function SimpleBetRow({ bet, index, bankroll, league }: { bet: SimpleBet; index:
 // ---------------------------------------------------------------------------
 // Combo card
 // ---------------------------------------------------------------------------
-function ComboCard({ combo, bankroll }: { combo: ComboBet; bankroll: number }) {
+function ComboCard({ combo, bankroll, slip }: { combo: ComboBet; bankroll: number; slip: ReturnType<typeof useBetSlip> }) {
   const payout = bankroll * combo.combinedOdds;
   const profit = payout - bankroll;
   const valueScore = combo.combinedProb * combo.combinedOdds;
+  // Add the entire combo to the slip in one click (replaces all current legs).
+  const loadCombo = () => {
+    slip.clear();
+    for (const leg of combo.legs) {
+      slip.add({
+        id: `${leg.matchId}-${leg.market}-${leg.selection}`,
+        matchId: leg.matchId,
+        matchLabel: leg.matchLabel,
+        market: leg.market,
+        selection: leg.selection,
+        odds: leg.odds,
+        modelProb: leg.modelProb,
+        source: leg.source,
+      });
+    }
+  };
   return (
     <div className="matte-card matte-card-hover rounded-xl p-5 flex flex-col gap-4 relative overflow-hidden">
       <div className="absolute top-0 right-0 w-40 h-40 rounded-full blur-3xl opacity-15 bg-primary -mr-12 -mt-12 pointer-events-none" />
@@ -1304,6 +1503,284 @@ function ComboCard({ combo, bankroll }: { combo: ComboBet; bankroll: number }) {
           </div>
         </div>
       </div>
+
+      <button
+        type="button"
+        onClick={loadCombo}
+        className="relative w-full text-[11px] uppercase tracking-[0.16em] font-bold py-2.5 rounded-md bg-primary/15 hover:bg-primary/25 text-primary ring-1 ring-inset ring-primary/40 transition-colors flex items-center justify-center gap-1.5"
+      >
+        <Layers className="w-3.5 h-3.5" />
+        Carrega aquesta combinada al butlletí
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Aposta del dia — single highlighted "bet of the day" hero banner.
+// ---------------------------------------------------------------------------
+function ApostaDelDiaHero({ bet, bankroll, match, league, slip }: { bet: SimpleBet; bankroll: number; match: BoardMatch | null; league: League | null; slip: ReturnType<typeof useBetSlip> }) {
+  const stake = kellyStakeEur(bet.kellyFraction, bankroll);
+  const payout = stake > 0 ? stake * bet.odds : bankroll * bet.odds;
+  const profit = stake > 0 ? payout - stake : payout - bankroll;
+  const valueScore = bet.modelProb * bet.odds;
+  const inSlip = slip.has(bet.id);
+  return (
+    <section className="mb-6">
+      <div className="relative matte-card rounded-2xl p-5 md:p-6 overflow-hidden border border-primary/40">
+        <div className="absolute -top-16 -right-16 w-64 h-64 rounded-full blur-3xl bg-primary/30 pointer-events-none" />
+        <div className="absolute -bottom-12 -left-12 w-56 h-56 rounded-full blur-3xl bg-accent/20 pointer-events-none" />
+        <div className="relative grid grid-cols-1 md:grid-cols-12 gap-5 md:gap-6 items-center">
+          <div className="md:col-span-7 flex flex-col gap-3 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.22em] font-bold text-primary bg-primary/15 ring-1 ring-inset ring-primary/40 px-2 py-1 rounded">
+                <Crown className="w-3 h-3" />
+                Aposta del dia
+              </span>
+              {league && <LeagueBadge league={league} compact />}
+              <RiskPill tier={bet.riskTier} compact />
+              <span className={
+                "text-[10px] uppercase tracking-[0.18em] font-semibold flex items-center gap-1 " +
+                (bet.source === "live" ? "text-accent" : "text-primary")
+              }>
+                <span className={"inline-block w-1.5 h-1.5 rounded-full " + (bet.source === "live" ? "bg-accent" : "bg-primary/70")} />
+                {bet.source === "live" ? "DK live" : "Model"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              {match?.homeCrest && <img src={match.homeCrest} alt="" className="w-9 h-9 object-contain" />}
+              <span className="text-base md:text-lg font-semibold truncate">{bet.matchLabel}</span>
+              {match?.awayCrest && <img src={match.awayCrest} alt="" className="w-9 h-9 object-contain" />}
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{bet.market}</div>
+              <div className="text-2xl md:text-3xl font-bold leading-tight mt-1">{bet.selection}</div>
+              <div className="text-[12px] text-muted-foreground mt-1.5 leading-snug max-w-xl">{bet.rationale}</div>
+            </div>
+            <div className="max-w-md mt-1"><ConfidenceBar confidence={bet.confidence} /></div>
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground font-mono">
+              {bet.status === "live" ? (
+                <><span className="pulse-dot scale-75" /><span className="text-red-300">en directe</span></>
+              ) : (
+                <><Clock className="w-3 h-3" />{fmtKickoff(bet.kickoff)}</>
+              )}
+              <span className="ml-2 text-muted-foreground/70">VE ×{valueScore.toFixed(2)}</span>
+              <ValueStars value={valueScore} />
+            </div>
+          </div>
+
+          <div className="md:col-span-5 flex flex-col gap-3">
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-lg bg-primary/10 ring-1 ring-inset ring-primary/30 p-3 text-center">
+                <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Quota</div>
+                <div className="font-mono text-2xl font-bold text-primary leading-none mt-1">{bet.odds.toFixed(2)}</div>
+              </div>
+              <div className="rounded-lg bg-emerald-400/10 ring-1 ring-inset ring-emerald-400/30 p-3 text-center">
+                <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Prob.</div>
+                <div className="font-mono text-2xl font-bold text-emerald-300 leading-none mt-1">{pct(bet.modelProb)}</div>
+              </div>
+              <div className="rounded-lg bg-amber-400/10 ring-1 ring-inset ring-amber-400/30 p-3 text-center">
+                <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground" title="Kelly ¼">Kelly</div>
+                <div className="font-mono text-2xl font-bold text-amber-300 leading-none mt-1">{stake > 0 ? eur(stake) : "—"}</div>
+              </div>
+            </div>
+            <div className="rounded-lg bg-accent/10 ring-1 ring-inset ring-accent/40 p-3 text-center">
+              <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
+                {stake > 0 ? `Apostant ${eur(stake)} guanyes` : `Apostant ${eur(bankroll)} guanyes`}
+              </div>
+              <div className="font-mono text-3xl font-bold text-accent leading-none mt-1">+{eur(profit)}</div>
+              <div className="text-[10px] text-muted-foreground mt-1 font-mono">Retorn total {eur(stake > 0 ? payout : bankroll * bet.odds)}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => slip.toggle({ id: bet.id, matchId: bet.matchId, matchLabel: bet.matchLabel, market: bet.market, selection: bet.selection, odds: bet.odds, modelProb: bet.modelProb, source: bet.source })}
+              className={
+                "w-full text-[11px] uppercase tracking-[0.16em] font-bold py-2.5 rounded-md transition-colors flex items-center justify-center gap-2 " +
+                (inSlip
+                  ? "bg-accent/20 text-accent ring-1 ring-inset ring-accent/40"
+                  : "bg-primary text-black hover:bg-primary/90")
+              }
+            >
+              {inSlip ? <><Check className="w-4 h-4" /> Al butlletí</> : <><Plus className="w-4 h-4" /> Afegir al butlletí</>}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 1X2 probability bar — visual breakdown of model home/draw/away probs.
+// ---------------------------------------------------------------------------
+function ProbabilityBar({ match }: { match: BoardMatch }) {
+  // Find the 1X2 markets in match.markets (group "Resultat 1X2" or "1X2")
+  const oneX2 = match.markets.filter((m) => /1X2|Resultat/i.test(m.group)).slice(0, 3);
+  // Map by selection: home / draw / away
+  const homeP = oneX2.find((m) => /local|home|^1$/i.test(m.selection))?.modelProb ?? null;
+  const drawP = oneX2.find((m) => /empat|draw|^X$/i.test(m.selection))?.modelProb ?? null;
+  const awayP = oneX2.find((m) => /visit|away|^2$/i.test(m.selection))?.modelProb ?? null;
+  if (homeP == null || drawP == null || awayP == null) return null;
+  const total = homeP + drawP + awayP;
+  if (total <= 0) return null;
+  const h = (homeP / total) * 100;
+  const d = (drawP / total) * 100;
+  const a = (awayP / total) * 100;
+  return (
+    <div className="px-4 py-2.5 border-y border-border/50 bg-black/20">
+      <div className="flex items-center justify-between text-[9px] uppercase tracking-[0.18em] text-muted-foreground mb-1">
+        <span title={`${match.homeShort} guanya`} className="text-primary/80 font-semibold">{match.homeShort} {pct(homeP)}</span>
+        <span title="Empat">Empat {pct(drawP)}</span>
+        <span title={`${match.awayShort} guanya`} className="text-amber-300/80 font-semibold">{pct(awayP)} {match.awayShort}</span>
+      </div>
+      <div className="flex w-full h-2 rounded-full overflow-hidden ring-1 ring-inset ring-border/40">
+        <div className="bg-primary/70 hover:bg-primary transition-colors" style={{ width: `${h}%` }} title={`${match.homeShort}: ${pct(homeP)}`} />
+        <div className="bg-muted-foreground/40" style={{ width: `${d}%` }} title={`Empat: ${pct(drawP)}`} />
+        <div className="bg-amber-400/70 hover:bg-amber-400 transition-colors" style={{ width: `${a}%` }} title={`${match.awayShort}: ${pct(awayP)}`} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Floating bet slip panel (bottom-right). Persists across reloads.
+// ---------------------------------------------------------------------------
+function BetSlipPanel({ slip, bankroll }: { slip: ReturnType<typeof useBetSlip>; bankroll: number }) {
+  const [open, setOpen] = useState(false);
+  const [stakeOverride, setStakeOverride] = useState<string>("");
+  const legs = slip.legs;
+  // Compute combined values (assuming independence — same as backend).
+  const { combinedOdds, combinedProb } = useMemo(() => {
+    if (legs.length === 0) return { combinedOdds: 0, combinedProb: 0 };
+    let o = 1, p = 1;
+    for (const l of legs) { o *= l.odds; p *= l.modelProb; }
+    return { combinedOdds: o, combinedProb: p };
+  }, [legs]);
+  const stake = (() => {
+    const n = parseFloat(stakeOverride);
+    return isFinite(n) && n > 0 ? n : bankroll;
+  })();
+  const payout = stake * combinedOdds;
+  const profit = payout - stake;
+  const evRatio = combinedProb * combinedOdds; // > 1 is +EV vs fair
+
+  const isCombo = legs.length >= 2;
+
+  if (legs.length === 0 && !open) return null;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-40 w-[min(92vw,380px)]">
+      {!open ? (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="w-full matte-card rounded-xl px-4 py-3 flex items-center justify-between gap-3 shadow-2xl ring-1 ring-primary/30 hover:ring-primary/60 transition-all"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="relative inline-grid place-items-center w-9 h-9 rounded-lg bg-primary/20 ring-1 ring-primary/40 text-primary shrink-0">
+              <Layers className="w-4 h-4" />
+              <span className="absolute -top-1.5 -right-1.5 inline-grid place-items-center min-w-[18px] h-[18px] px-1 rounded-full bg-primary text-black text-[10px] font-bold font-mono">
+                {legs.length}
+              </span>
+            </div>
+            <div className="text-left min-w-0">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Butlletí</div>
+              <div className="text-sm font-semibold truncate">
+                {legs.length === 1 ? "Aposta simple" : `Combinada · ×${combinedOdds.toFixed(2)}`}
+              </div>
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Guany</div>
+            <div className="font-mono text-base font-bold text-accent leading-none">+{eur(profit)}</div>
+          </div>
+        </button>
+      ) : (
+        <div className="matte-card rounded-xl shadow-2xl ring-1 ring-primary/30 max-h-[80vh] flex flex-col overflow-hidden">
+          <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-border/50 bg-gradient-to-r from-primary/[0.08] to-transparent">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-primary" />
+              <h3 className="text-sm font-bold uppercase tracking-[0.16em]">Butlletí · {legs.length}</h3>
+            </div>
+            <div className="flex items-center gap-1">
+              {legs.length > 0 && (
+                <button type="button" onClick={() => slip.clear()} className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-destructive flex items-center gap-1 px-2 py-1 rounded">
+                  <Trash2 className="w-3 h-3" /> Buidar
+                </button>
+              )}
+              <button type="button" onClick={() => setOpen(false)} className="inline-grid place-items-center w-7 h-7 rounded-md hover:bg-white/[0.06] text-muted-foreground hover:text-foreground" title="Tancar">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            {legs.length === 0 ? (
+              <div className="text-center text-xs text-muted-foreground py-8 px-4">
+                El butlletí està buit. Toca <span className="text-primary font-semibold">+ Afegir</span> en qualsevol mercat per construir la teva aposta.
+              </div>
+            ) : (
+              legs.map((leg) => (
+                <div key={leg.id} className="rounded-md border border-border/50 bg-black/20 p-2.5 flex items-start gap-2">
+                  <span className={"inline-block w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 " + (leg.source === "live" ? "bg-accent" : "bg-primary/70")} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground truncate">{leg.matchLabel}</div>
+                    <div className="text-sm font-semibold leading-tight truncate">{leg.selection}</div>
+                    <div className="text-[10px] text-muted-foreground mt-0.5 truncate">{leg.market} · {pct(leg.modelProb)} prob</div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="font-mono text-sm font-bold text-primary leading-none">{leg.odds.toFixed(2)}</div>
+                    <button type="button" onClick={() => slip.remove(leg.id)} className="mt-1.5 inline-grid place-items-center w-6 h-6 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive" title="Treure">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {legs.length > 0 && (
+            <div className="border-t border-border/50 p-3 space-y-3 bg-black/30">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-md bg-primary/[0.08] ring-1 ring-inset ring-primary/30 p-2 text-center">
+                  <div className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground">{isCombo ? "Quota total" : "Quota"}</div>
+                  <div className="font-mono text-base font-bold text-primary leading-none mt-0.5">{isCombo ? `×${combinedOdds.toFixed(2)}` : combinedOdds.toFixed(2)}</div>
+                </div>
+                <div className="rounded-md bg-emerald-400/[0.08] ring-1 ring-inset ring-emerald-400/30 p-2 text-center">
+                  <div className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground">Prob.</div>
+                  <div className="font-mono text-base font-bold text-emerald-300 leading-none mt-0.5">{pct(combinedProb)}</div>
+                </div>
+                <div className={"rounded-md p-2 text-center ring-1 ring-inset " + (evRatio > 1 ? "bg-accent/[0.1] ring-accent/40" : "bg-muted/20 ring-border/40")}>
+                  <div className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground">VE</div>
+                  <div className={"font-mono text-base font-bold leading-none mt-0.5 " + (evRatio > 1 ? "text-accent" : "text-muted-foreground")}>×{evRatio.toFixed(2)}</div>
+                </div>
+              </div>
+
+              <label className="block">
+                <div className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground mb-1">Aposta (€)</div>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0.5"
+                  step="0.5"
+                  value={stakeOverride}
+                  onChange={(e) => setStakeOverride(e.target.value)}
+                  placeholder={String(bankroll)}
+                  className="w-full bg-black/40 border border-border/60 rounded-md px-2.5 py-1.5 text-sm font-mono focus:outline-none focus:border-primary/60"
+                />
+              </label>
+
+              <div className="rounded-md bg-accent/[0.08] ring-1 ring-inset ring-accent/30 p-2.5 flex items-center justify-between">
+                <div>
+                  <div className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground">Guany potencial</div>
+                  <div className="text-[10px] text-muted-foreground font-mono">Retorn {eur(payout)}</div>
+                </div>
+                <div className="font-mono text-2xl font-bold text-accent leading-none">+{eur(profit)}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
