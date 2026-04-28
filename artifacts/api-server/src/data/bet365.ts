@@ -724,7 +724,7 @@ function valueScoreFor(prob: number, odds: number, edge: number, source: MarketS
   return +(ve + liveBonus + edgeBonus + oddsBand).toFixed(4);
 }
 
-export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos: ComboBet[] }> {
+export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos: ComboBet[]; safeCombos: ComboBet[] }> {
   const board = await getBoard();
   const simples: SimpleBet[] = [];
 
@@ -947,9 +947,84 @@ export async function buildSuggestions(): Promise<{ simples: SimpleBet[]; combos
   // Sort: highest joint probability first (safer combos before riskier ones).
   combos.sort((a, b) => b.combinedProb - a.combinedProb);
 
+  // ────────────────────────────────────────────────────────────────────────
+  // SAFE COMBOS ("Duo Segura") — combos engineered for the user's explicit
+  // goal: maximise winnings with **minimal risk of loss**. Each leg must be
+  // individually very probable (≥65%) AND have non-trivial odds (≥1.40), and
+  // the joint probability of the whole combo must still beat 50%. Result:
+  // a "safer than a single 1.50 bet" combo with multiplier 1.80x-2.50x.
+  // ────────────────────────────────────────────────────────────────────────
+  const safeCombos: ComboBet[] = [];
+  const safePoolBase = [...bestPerMatch.values()]
+    .filter((s) => s.modelProb >= 0.65 && s.odds >= 1.40)
+    .sort((a, b) => (b.modelProb * b.odds) - (a.modelProb * a.odds))
+    .slice(0, 14);
+
+  // 2-leg "Duo Segura": each leg ≥65% prob, joint prob ≥45%, max odds.
+  // Each subsequent combo uses fresh matches (no repeated matchId across the
+  // 3 combos) so the user gets genuinely diversified options, not 3 copies
+  // of the same anchor leg paired with interchangeable seconds.
+  if (safePoolBase.length >= 2) {
+    const usedMatchIds = new Set<number>();
+    for (let attempt = 0; attempt < 3 && safeCombos.length < 3; attempt++) {
+      let best: { legs: SimpleBet[]; odds: number; prob: number } | null = null;
+      for (let i = 0; i < safePoolBase.length; i++) {
+        for (let j = i + 1; j < safePoolBase.length; j++) {
+          const a = safePoolBase[i]!, b = safePoolBase[j]!;
+          if (a.matchId === b.matchId) continue;
+          if (usedMatchIds.has(a.matchId) || usedMatchIds.has(b.matchId)) continue;
+          const prob = a.modelProb * b.modelProb;
+          if (prob < 0.45) continue;
+          const odds = a.odds * b.odds;
+          if (odds < 1.80) continue;
+          if (!best || odds > best.odds) best = { legs: [a, b], odds, prob };
+        }
+      }
+      if (!best) break;
+      for (const l of best.legs) usedMatchIds.add(l.matchId);
+      const winPct = (best.prob * 100).toFixed(0);
+      const oddsPct = best.odds.toFixed(2);
+      safeCombos.push(makeCombo(best.legs,
+        `Duo Segura: dues seleccions amb >65% individual, ${winPct}% conjunta, multiplicador ×${oddsPct}.`));
+    }
+  }
+
+  // 3-leg "Triple Segura": every leg ≥70% prob, joint ≥40%.
+  const triplePool = [...bestPerMatch.values()]
+    .filter((s) => s.modelProb >= 0.70 && s.odds >= 1.30)
+    .sort((a, b) => (b.modelProb * b.odds) - (a.modelProb * a.odds))
+    .slice(0, 10);
+  if (triplePool.length >= 3) {
+    const indices: number[][] = [];
+    const cur: number[] = [];
+    function recurse3(start: number) {
+      if (cur.length === 3) { indices.push([...cur]); return; }
+      for (let i = start; i <= triplePool.length - (3 - cur.length); i++) {
+        cur.push(i); recurse3(i + 1); cur.pop();
+      }
+    }
+    recurse3(0);
+    let best: { legs: SimpleBet[]; odds: number; prob: number } | null = null;
+    for (const idx of indices) {
+      const legs = idx.map((i) => triplePool[i]!);
+      const matchIds = new Set(legs.map((l) => l.matchId));
+      if (matchIds.size < 3) continue;
+      const prob = legs.reduce((a, l) => a * l.modelProb, 1);
+      if (prob < 0.40) continue;
+      const odds = legs.reduce((a, l) => a * l.odds, 1);
+      if (odds < 2.20) continue;
+      if (!best || odds > best.odds) best = { legs, odds, prob };
+    }
+    if (best) {
+      safeCombos.push(makeCombo(best.legs,
+        `Triple Segura: tres seleccions amb >70% individual, ${(best.prob * 100).toFixed(0)}% conjunta, multiplicador ×${best.odds.toFixed(2)}.`));
+    }
+  }
+
   return {
     simples: simples.slice(0, 60),
     combos,
+    safeCombos,
   };
 }
 

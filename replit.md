@@ -26,9 +26,21 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
-## Futbol Edge (v0.7.1 — April 2026, value-first proposals + podium UI)
+## Futbol Edge (v0.8.0 — April 2026, strategic dashboard + risk-mode toggle)
 
-### v0.7.1 changelog (current)
+### v0.8.0 changelog (current)
+
+- **Backend** (`bet365.ts`):
+  - New `safeCombos` array on `/api/bet365/suggestions`: 2-leg "Duo Segura" combos engineered for the user's "max winnings, min risk of loss" goal — each leg ≥65% individual prob & ≥1.40 odds, joint prob ≥45%, combined odds ≥1.80. Up to 3 combos returned, **diversified by matchId** so each combo uses fresh fixtures (no anchor-leg duplication). Plus a 3-leg "Triple Segura" when ≥70%-prob legs are available across ≥3 matches.
+  - `buildSuggestions()` return type updated to `{ simples, combos, safeCombos }`.
+- **Frontend** (`board.tsx`):
+  - **Risk Mode toggle** (Conservador / Equilibrat / Agressiu): top of the sticky filter bar. Each mode adjusts the global `minProb`/`minOdds` floors and the simples sort order. Conservador forces ≥62% prob & ≥1.40 odds; Agressiu biases toward higher quotes & sort-by-odds. The Aposta del dia and hero picks honour the active mode.
+  - **Min-prob & Min-odds sliders** in the filter bar (`RangeSlider`): explicit user control over the simples & hero pick floors.
+  - **`Pla de banca d'avui` card** (new `BankrollPlanCard` component): the strategic centerpiece, placed right under Aposta del dia. Aggregates Kelly stakes across the day's top 4-6 picks (size depends on mode), showing: total stake (€ + % of bankroll), expected profit (€ + ROI %), probability of ≥half the picks winning (binomial), max return if all win, plus a "Afegir tot al butlletí" button. Each pick is listed inline with one-tap add/remove. Helper `atLeastKBinomial(probs, k)` does the binomial-DP calculation.
+  - **`Duo Segura` section** (new): renders the new `safeCombos` above the regular combos with an "MÍNIM RISC" emerald ribbon on each card. Reuses `ComboCard` for consistency.
+  - Hero picks now also enforce a per-match cap of 2 (in addition to the existing per-selection cap of 2) for true diversification.
+
+### v0.7.1 changelog
 
 - **Backend** (`bet365.ts`): tightened the proposal floors to honour the user's "very probable AND maximum odds" goal — `MIN_PROB_FOR_SUGGESTION = 0.45`, `MIN_ODDS_FOR_SUGGESTION = 1.30` (player props at ≥1.55), eliminating noise like 1.05 Over 0.5 picks. Added a `valueScore = prob × odds + small bonuses (DK live, edge, sweet-spot 1.55-2.50 odds band)` field on every `SimpleBet` and a `qualityTier` enum (`joia | valor | segur | edge | estandard`) — "joia" = ≥65% prob AND ≥1.80 odds (the unicorn pick), "valor" = ≥55% prob AND ≥1.55 odds (sweet spot). Simples are now **sorted by `valueScore` first** (replaces the previous risk-tier-first sort) and de-duplicated to max 2 picks per match. Combos tightened: every leg must be ≥55% prob AND ≥1.50 odds.
 - **Frontend** (`board.tsx`):

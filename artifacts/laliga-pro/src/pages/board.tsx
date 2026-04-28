@@ -164,6 +164,8 @@ interface SuggestionsResponse {
   totalMatchCount: number;
   simples: SimpleBet[];
   combos: ComboBet[];
+  /** Combos engineered for very low risk: each leg ≥65% prob, joint ≥45%. */
+  safeCombos: ComboBet[];
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,34 @@ function kellyStakeEur(kellyFraction: number, bankroll: number): number {
   if (!isFinite(kellyFraction) || kellyFraction <= 0) return 0;
   const raw = bankroll * kellyFraction;
   return Math.max(0, Math.min(bankroll, raw));
+}
+
+/**
+ * Probability that AT LEAST k of the given independent Bernoulli trials
+ * (with per-trial success probabilities `probs`) succeed. Used to estimate
+ * "what are the odds that at least half of today's picks win?" — the key
+ * metric for portfolio safety.
+ */
+function atLeastKBinomial(probs: number[], k: number): number {
+  const n = probs.length;
+  if (n === 0) return 0;
+  if (k <= 0) return 1;
+  if (k > n) return 0;
+  // dp[j] = prob of exactly j successes after processing i trials
+  let dp = new Array<number>(n + 1).fill(0);
+  dp[0] = 1;
+  for (let i = 0; i < n; i++) {
+    const p = probs[i]!;
+    const next = new Array<number>(n + 1).fill(0);
+    for (let j = 0; j <= i; j++) {
+      next[j]     += dp[j]! * (1 - p);
+      next[j + 1] += dp[j]! * p;
+    }
+    dp = next;
+  }
+  let s = 0;
+  for (let j = k; j <= n; j++) s += dp[j]!;
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,14 +406,34 @@ function eur(n: number): string {
 type RiskFilter = "all" | "molt baix" | "baix" | "moderat" | "alt";
 type SourceFilter = "all" | "live";
 type SimplesSort = "value" | "prob" | "odds" | "edge";
+type RiskMode = "conservador" | "equilibrat" | "agressiu";
 interface Filters {
   risk: RiskFilter;
   query: string;
   source: SourceFilter;
   league: string; // "all" or league code
   sort: SimplesSort;
+  mode: RiskMode;
+  /** Minimum model probability (0..1) to show a simple. */
+  minProb: number;
+  /** Minimum decimal odds to show a simple. */
+  minOdds: number;
 }
-const DEFAULT_FILTERS: Filters = { risk: "all", query: "", source: "all", league: "all", sort: "value" };
+const DEFAULT_FILTERS: Filters = {
+  risk: "all", query: "", source: "all", league: "all", sort: "value",
+  mode: "equilibrat", minProb: 0.45, minOdds: 1.30,
+};
+
+/**
+ * Risk mode = quick preset that overrides the user's explicit min sliders
+ * with stricter or looser defaults. Conservador = max safety, Agressiu = max
+ * upside, Equilibrat = current balanced behavior.
+ */
+function applyRiskMode(f: Filters, mode: RiskMode): Filters {
+  if (mode === "conservador") return { ...f, mode, minProb: Math.max(f.minProb, 0.62), minOdds: Math.max(f.minOdds, 1.40), sort: "value" };
+  if (mode === "agressiu")    return { ...f, mode, minProb: Math.min(f.minProb, 0.45), minOdds: Math.max(f.minOdds, 1.70), sort: "odds" };
+  return { ...f, mode, minProb: 0.45, minOdds: 1.30, sort: "value" };
+}
 
 function matchesFilter(label: string, q: string): boolean {
   if (!q) return true;
@@ -456,6 +506,8 @@ export default function Board() {
   const filteredSimples = useMemo(() => {
     if (!sg) return [];
     const filtered = sg.simples.filter((b) => {
+      if (b.modelProb < filters.minProb) return false;
+      if (b.odds < filters.minOdds) return false;
       if (filters.risk !== "all" && b.riskTier !== filters.risk) return false;
       if (filters.source === "live" && b.source !== "live") return false;
       if (filters.league !== "all") {
@@ -476,37 +528,96 @@ export default function Board() {
   }, [sg, filters, leagueByMatch]);
 
   // Top picks of the day = picks that satisfy the user's "safe + max odds" goal.
-  // We pull from sg.simples (already prefiltered to prob ≥ 45% & odds ≥ 1.30)
-  // and rank by valueScore. To avoid showing 9 copies of the same selection
-  // type ("Under 10.5 Còrners") we apply a market-diversity cap of 2 per
-  // selection across the podium.
+  // We pull from sg.simples and rank by valueScore but respect the global
+  // RISK MODE so the user can dial the whole board between max-safety and
+  // max-upside. To avoid showing 9 copies of the same selection type
+  // ("Under 10.5 Còrners") we apply a market-diversity cap of 2 per selection.
   const heroPicks = useMemo(() => {
     if (!sg) return [];
-    const ranked = [...sg.simples].sort((a, b) => b.valueScore - a.valueScore);
+    const minProb = filters.minProb;
+    const minOdds = filters.minOdds;
+    const pool = sg.simples.filter((b) => b.modelProb >= minProb && b.odds >= minOdds);
+    const cmp: Record<SimplesSort, (a: SimpleBet, b: SimpleBet) => number> = {
+      value: (a, b) => b.valueScore - a.valueScore,
+      prob:  (a, b) => b.modelProb  - a.modelProb,
+      odds:  (a, b) => b.odds       - a.odds,
+      edge:  (a, b) => b.edge       - a.edge,
+    };
+    const ranked = [...pool].sort(cmp[filters.sort]);
     const perSelectionCount = new Map<string, number>();
+    const perMatchCount = new Map<number, number>();
     const out: SimpleBet[] = [];
     for (const b of ranked) {
-      // Use a coarse selection signature so "Under 2.5" from different matches
-      // counts as the same kind of pick.
       const sig = `${b.market}::${b.selection}`;
       const c = perSelectionCount.get(sig) ?? 0;
-      if (c >= 2) continue;
+      const m = perMatchCount.get(b.matchId) ?? 0;
+      if (c >= 2 || m >= 2) continue;
       perSelectionCount.set(sig, c + 1);
+      perMatchCount.set(b.matchId, m + 1);
       out.push(b);
       if (out.length >= 9) break;
     }
     return out;
-  }, [sg]);
+  }, [sg, filters.minProb, filters.minOdds, filters.sort]);
 
   // The single best pick of the day — top of the value ranking with a safety
-  // and confidence floor. Headline "Aposta del dia".
+  // and confidence floor. Headline "Aposta del dia". Respects risk mode: in
+  // Conservador we require ≥62% prob; in Agressiu we relax confidence and
+  // bias toward higher odds.
   const apostaDelDia = useMemo(() => {
     if (!sg) return null;
+    const mode = filters.mode;
+    const probFloor   = mode === "conservador" ? 0.62 : mode === "agressiu" ? 0.48 : 0.50;
+    const oddsFloor   = mode === "agressiu" ? 1.70 : 1.50;
+    const confFloor   = mode === "agressiu" ? 0.40 : 0.45;
     const pool = sg.simples
-      .filter((b) => b.modelProb >= 0.50 && b.odds >= 1.50 && b.confidence >= 0.45);
+      .filter((b) => b.modelProb >= probFloor && b.odds >= oddsFloor && b.confidence >= confFloor);
     if (pool.length === 0) return null;
+    if (mode === "agressiu") {
+      // Maximize odds × prob² — biased toward bigger payouts that still hit.
+      return [...pool].sort((a, b) => (b.odds * b.modelProb * b.modelProb) - (a.odds * a.modelProb * a.modelProb))[0]!;
+    }
     return [...pool].sort((a, b) => b.valueScore - a.valueScore)[0]!;
-  }, [sg]);
+  }, [sg, filters.mode]);
+
+  // Bankroll plan = recommended Kelly portfolio across the day's top picks.
+  // Sums fractional-Kelly stakes, expected profit, and computes the joint
+  // probability of "at least half the picks win" via a binomial estimate.
+  const bankrollPlan = useMemo(() => {
+    if (heroPicks.length === 0) return null;
+    const picks = heroPicks.slice(0, filters.mode === "conservador" ? 4 : 6);
+    let totalStake = 0;
+    let totalEv    = 0;
+    let totalReturnIfAllWin = 0;
+    const probs: number[] = [];
+    const leagues = new Set<string>();
+    const matches = new Set<number>();
+    for (const p of picks) {
+      const stake = kellyStakeEur(p.kellyFraction, bankroll);
+      totalStake += stake;
+      // EV per pick = stake × (odds × prob - 1)
+      totalEv += stake * (p.odds * p.modelProb - 1);
+      totalReturnIfAllWin += stake * p.odds;
+      probs.push(p.modelProb);
+      const lg = leagueByMatch.get(p.matchId);
+      if (lg) leagues.add(lg.code);
+      matches.add(p.matchId);
+    }
+    // Probability of at least ceil(N/2) picks winning (independent assumption).
+    const need = Math.ceil(picks.length / 2);
+    const probAtLeastHalf = atLeastKBinomial(probs, need);
+    return {
+      picks,
+      totalStake: +totalStake.toFixed(2),
+      totalEv: +totalEv.toFixed(2),
+      totalReturnIfAllWin: +totalReturnIfAllWin.toFixed(2),
+      avgProb: probs.reduce((a, b) => a + b, 0) / probs.length,
+      probAtLeastHalf,
+      leagueCount: leagues.size,
+      matchCount: matches.size,
+      need,
+    };
+  }, [heroPicks, bankroll, filters.mode, leagueByMatch]);
 
   return (
     <Layout
@@ -538,6 +649,17 @@ export default function Board() {
           match={data?.matches.find((m) => m.matchId === apostaDelDia.matchId) ?? null}
           league={leagueByMatch.get(apostaDelDia.matchId) ?? null}
           slip={slip}
+        />
+      )}
+
+      {/* ============== BANKROLL PLAN ============== */}
+      {bankrollPlan && (
+        <BankrollPlanCard
+          plan={bankrollPlan}
+          bankroll={bankroll}
+          mode={filters.mode}
+          slip={slip}
+          leagueByMatch={leagueByMatch}
         />
       )}
 
@@ -653,6 +775,27 @@ export default function Board() {
         )}
       </section>
 
+      {/* ============== SAFE COMBOS · DUO SEGURA ============== */}
+      {sg && sg.safeCombos && sg.safeCombos.length > 0 && (
+        <section className="mb-8" id="safe-combos">
+          <SectionHeader
+            title="Duo Segura · combinades de mínim risc"
+            subtitle="Combinacions on cada cama té >65% de probabilitat individual i la probabilitat conjunta supera el 45%. Multipliquen la quota mantenint la seguretat: el punt dolç entre simple i combinada."
+            icon={<ShieldCheck className="w-5 h-5" />}
+          />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {sg.safeCombos.map((c) => (
+              <div key={c.id} className="relative">
+                <div className="absolute -top-2 left-3 z-10 inline-flex items-center gap-1 rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/40 text-emerald-300 text-[10px] uppercase tracking-[0.16em] px-2 py-0.5 font-bold">
+                  <ShieldCheck className="w-3 h-3" /> Mínim risc
+                </div>
+                <ComboCard combo={c} bankroll={bankroll} slip={slip} />
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* ============== COMBOS ============== */}
       <section className="mb-8" id="combos">
         <SectionHeader
@@ -708,6 +851,169 @@ function SectionHeader({ title, subtitle, icon }: { title: string; subtitle: str
 }
 
 // ---------------------------------------------------------------------------
+// Range slider — used in FiltersBar for prob/odds floors.
+// ---------------------------------------------------------------------------
+function RangeSlider({
+  label, value, min, max, step, onChange, format, tint,
+}: {
+  label: string; value: number; min: number; max: number; step: number;
+  onChange: (v: number) => void; format: (v: number) => string; tint: string;
+}) {
+  return (
+    <label className="flex items-center gap-2 min-w-[150px] flex-1 max-w-[260px]">
+      <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground font-semibold whitespace-nowrap">{label}</span>
+      <input
+        type="range"
+        min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 h-1 accent-primary cursor-pointer"
+      />
+      <span className={`text-[11px] font-mono font-semibold tabular-nums w-12 text-right ${tint}`}>{format(value)}</span>
+    </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bankroll plan card — aggregates the day's recommended Kelly stakes,
+// expected profit, and probability of beating the day. The user's headline
+// metric for "what should I do today to win money safely?".
+// ---------------------------------------------------------------------------
+type BankrollPlan = {
+  picks: SimpleBet[];
+  totalStake: number;
+  totalEv: number;
+  totalReturnIfAllWin: number;
+  avgProb: number;
+  probAtLeastHalf: number;
+  leagueCount: number;
+  matchCount: number;
+  need: number;
+};
+
+function BankrollPlanCard({
+  plan, bankroll, mode, slip, leagueByMatch,
+}: {
+  plan: BankrollPlan;
+  bankroll: number;
+  mode: RiskMode;
+  slip: ReturnType<typeof useBetSlip>;
+  leagueByMatch: Map<number, League>;
+}) {
+  const stakePct = bankroll > 0 ? (plan.totalStake / bankroll) * 100 : 0;
+  const roiPct   = plan.totalStake > 0 ? (plan.totalEv / plan.totalStake) * 100 : 0;
+  const allInSlip = () => {
+    for (const p of plan.picks) {
+      slip.add({
+        id: p.id, matchId: p.matchId, matchLabel: p.matchLabel,
+        market: p.market, selection: p.selection, odds: p.odds, modelProb: p.modelProb, source: p.source,
+      });
+    }
+  };
+  const modeLabel = mode === "conservador" ? "Conservador" : mode === "agressiu" ? "Agressiu" : "Equilibrat";
+  return (
+    <section className="mb-8 rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-950/30 via-background/60 to-amber-950/15 p-5 md:p-6">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-5">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/15 ring-1 ring-emerald-500/40 flex items-center justify-center">
+            <ShieldCheck className="w-6 h-6 text-emerald-300" />
+          </div>
+          <div>
+            <h2 className="text-lg md:text-xl font-bold tracking-tight">Pla de banca d'avui</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Cartera Kelly fraccional · Mode <span className="text-emerald-300 font-semibold">{modeLabel}</span> · {plan.matchCount} partits · {plan.leagueCount} lligues
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={allInSlip}
+          className="shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 ring-1 ring-emerald-500/40 text-xs uppercase tracking-[0.14em] font-bold transition-colors"
+        >
+          <Layers className="w-3.5 h-3.5" /> Afegir tot al butlletí
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <PlanStat
+          label="Inversió suggerida"
+          value={`${plan.totalStake.toFixed(2)} €`}
+          sub={`${stakePct.toFixed(1)}% banca`}
+          tint="text-foreground"
+        />
+        <PlanStat
+          label="Guany esperat"
+          value={`${plan.totalEv >= 0 ? "+" : ""}${plan.totalEv.toFixed(2)} €`}
+          sub={`ROI ${roiPct >= 0 ? "+" : ""}${roiPct.toFixed(1)}%`}
+          tint={plan.totalEv >= 0 ? "text-emerald-300" : "text-red-300"}
+        />
+        <PlanStat
+          label={`Prob. ≥${plan.need} encerts`}
+          value={`${(plan.probAtLeastHalf * 100).toFixed(0)}%`}
+          sub={`Mitjana ${(plan.avgProb * 100).toFixed(0)}%`}
+          tint="text-amber-300"
+        />
+        <PlanStat
+          label="Si tot guanya"
+          value={`${plan.totalReturnIfAllWin.toFixed(2)} €`}
+          sub={`×${plan.totalStake > 0 ? (plan.totalReturnIfAllWin / plan.totalStake).toFixed(2) : "0.00"} multiplicador`}
+          tint="text-primary"
+        />
+      </div>
+
+      {/* Mini list of picks composing the plan */}
+      <div className="space-y-1.5">
+        {plan.picks.map((p, i) => {
+          const stake = kellyStakeEur(p.kellyFraction, bankroll);
+          const lg = leagueByMatch.get(p.matchId);
+          const inSlip = slip.has(p.id);
+          return (
+            <div key={p.id} className="flex items-center gap-2 text-xs px-3 py-2 rounded-md bg-background/40 ring-1 ring-border/40 hover:ring-border/80 transition-colors">
+              <span className="font-mono text-muted-foreground w-5 shrink-0">{i + 1}.</span>
+              {lg && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: lg.color }} />}
+              <span className="text-foreground/90 truncate flex-1 min-w-0">
+                <span className="text-muted-foreground">{p.matchLabel}</span> · <span className="font-semibold">{p.selection}</span>
+              </span>
+              <span className="font-mono text-emerald-300 tabular-nums shrink-0">{Math.round(p.modelProb * 100)}%</span>
+              <span className="font-mono text-primary tabular-nums shrink-0">@{p.odds.toFixed(2)}</span>
+              <span className="font-mono text-foreground tabular-nums shrink-0 w-14 text-right">{stake.toFixed(2)}€</span>
+              <button
+                type="button"
+                onClick={() => slip.toggle({
+                  id: p.id, matchId: p.matchId, matchLabel: p.matchLabel,
+                  market: p.market, selection: p.selection, odds: p.odds, modelProb: p.modelProb, source: p.source,
+                })}
+                className={
+                  "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-[0.12em] font-bold ring-1 ring-inset transition-colors " +
+                  (inSlip
+                    ? "bg-emerald-500/15 text-emerald-300 ring-emerald-500/40"
+                    : "bg-muted/20 text-muted-foreground ring-border/60 hover:text-foreground")
+                }
+                title={inSlip ? "Treure del butlletí" : "Afegir al butlletí"}
+              >
+                {inSlip ? "✓" : "+"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-4 text-[11px] text-muted-foreground/80 leading-relaxed">
+        <strong className="text-foreground/80">Com llegir-ho:</strong> Si avui apostes <span className="text-emerald-300 font-semibold">{plan.totalStake.toFixed(2)} €</span> repartits en aquests {plan.picks.length} picks, el model espera un guany net de <span className={plan.totalEv >= 0 ? "text-emerald-300 font-semibold" : "text-red-300 font-semibold"}>{plan.totalEv >= 0 ? "+" : ""}{plan.totalEv.toFixed(2)} €</span> per dia mitjà. Hi ha un <span className="text-amber-300 font-semibold">{(plan.probAtLeastHalf * 100).toFixed(0)}%</span> de probabilitat que almenys {plan.need} dels {plan.picks.length} picks surtin guanyadors (assumint independència).
+      </p>
+    </section>
+  );
+}
+
+function PlanStat({ label, value, sub, tint }: { label: string; value: string; sub: string; tint: string }) {
+  return (
+    <div className="rounded-lg border border-border/40 bg-background/40 px-3 py-2.5">
+      <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground font-semibold">{label}</div>
+      <div className={`text-xl md:text-2xl font-bold font-mono tabular-nums tracking-tight mt-0.5 ${tint}`}>{value}</div>
+      <div className="text-[10px] text-muted-foreground/70 mt-0.5">{sub}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Filters bar (sticky)
 // ---------------------------------------------------------------------------
 function FiltersBar({
@@ -728,9 +1034,62 @@ function FiltersBar({
     { v: "moderat", label: "Moderat" },
     { v: "alt", label: "Alt" },
   ];
-  const isFiltered = filters.risk !== "all" || filters.query !== "" || filters.source !== "all" || filters.league !== "all";
+  const isFiltered = filters.risk !== "all" || filters.query !== "" || filters.source !== "all" || filters.league !== "all" || filters.minProb > 0.45 || filters.minOdds > 1.30;
+  const MODE_OPTIONS: { v: RiskMode; label: string; sub: string; iconColor: string }[] = [
+    { v: "conservador", label: "Conservador", sub: "≥62% prob", iconColor: "text-emerald-300" },
+    { v: "equilibrat",  label: "Equilibrat",  sub: "Per defecte", iconColor: "text-primary" },
+    { v: "agressiu",    label: "Agressiu",    sub: "Quotes altes", iconColor: "text-amber-300" },
+  ];
   return (
     <div className="sticky top-16 z-10 -mx-4 md:-mx-8 px-4 md:px-8 py-3 mb-6 backdrop-blur-md bg-background/80 border-y border-border/60">
+      {/* Strategic mode + thresholds row */}
+      <div className="flex flex-col lg:flex-row lg:items-center gap-3 mb-3 pb-3 border-b border-border/40">
+        <div className="flex items-center gap-2 shrink-0">
+          <ShieldCheck className="w-4 h-4 text-emerald-300" />
+          <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground font-semibold">Estratègia</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {MODE_OPTIONS.map((o) => {
+            const active = filters.mode === o.v;
+            return (
+              <button
+                key={o.v}
+                type="button"
+                onClick={() => onChange(applyRiskMode(filters, o.v))}
+                title={`Mode ${o.label} — ${o.sub}`}
+                className={
+                  "flex flex-col items-start gap-0 px-3 py-1.5 rounded-md ring-1 ring-inset transition-colors " +
+                  (active
+                    ? "bg-primary/15 text-primary ring-primary/40"
+                    : "bg-muted/20 text-muted-foreground ring-border/60 hover:text-foreground hover:bg-muted/40")
+                }
+              >
+                <span className="text-[11px] uppercase tracking-[0.14em] font-bold leading-tight">{o.label}</span>
+                <span className="text-[9px] uppercase tracking-[0.10em] opacity-70 leading-tight">{o.sub}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-1 items-center gap-4 min-w-0">
+          <RangeSlider
+            label="Prob. mín."
+            value={filters.minProb}
+            min={0.30} max={0.85} step={0.01}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={(v) => onChange({ ...filters, minProb: v })}
+            tint="text-emerald-300"
+          />
+          <RangeSlider
+            label="Quota mín."
+            value={filters.minOdds}
+            min={1.10} max={3.00} step={0.05}
+            format={(v) => v.toFixed(2)}
+            onChange={(v) => onChange({ ...filters, minOdds: v })}
+            tint="text-primary"
+          />
+        </div>
+      </div>
+
       <div className="flex flex-col lg:flex-row lg:items-center gap-3">
         <div className="flex items-center gap-2 shrink-0">
           <Filter className="w-4 h-4 text-primary" />
